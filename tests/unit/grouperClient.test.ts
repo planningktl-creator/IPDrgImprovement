@@ -4,8 +4,6 @@ import {
   calculateDrg,
   DRG_API_BASE,
   DRG_VERSION,
-  MAX_SDX,
-  type DrgCaseInput,
 } from '@/drg/grouperClient';
 
 describe('buildDrgPayload', () => {
