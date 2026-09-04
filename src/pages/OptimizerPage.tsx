@@ -17,6 +17,8 @@ import {
   fetchUsageItems,
   retrieveBmsSession,
   extractConnectionConfig,
+  getStoredBmsSessionId,
+  persistBmsSessionId,
   type BmsConnectionConfig,
 } from '@/services/cmiApi';
 import { DEFAULT_HCODE } from '@/drg/grouperContract';
@@ -56,10 +58,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
   // Session & Connection State
   const [bmsSessionId, setBmsSessionId] = useState<string>(() => {
     if (externalSessionId) return externalSessionId;
-    if (typeof window !== 'undefined') {
-      return new URLSearchParams(window.location.search).get('bms-session-id')?.trim() || '';
-    }
-    return '';
+    return getStoredBmsSessionId();
   });
   const [connectionConfig, setConnectionConfig] = useState<BmsConnectionConfig | null>(externalConfig ?? null);
   const [sessionStatus, setSessionStatus] = useState<'idle' | 'connected' | 'demo' | 'error'>(externalStatus ?? 'idle');
@@ -108,7 +107,19 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
     }
   }, [onConnectSession]);
 
-  // Connect on mount if session was passed in URL query param
+  useEffect(() => {
+    if (externalConfig) {
+      setConnectionConfig(externalConfig);
+    }
+  }, [externalConfig]);
+
+  useEffect(() => {
+    if (externalStatus) {
+      setSessionStatus(externalStatus);
+    }
+  }, [externalStatus]);
+
+  // Connect on mount if session was passed in URL query param or storage
   useEffect(() => {
     let ignore = false;
     if (bmsSessionId) {
@@ -117,6 +128,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
           if (!ignore) {
             const conf = extractConnectionConfig(raw);
             setConnectionConfig(conf);
+            persistBmsSessionId(bmsSessionId);
             if (raw.hospital_code && /^\d{5}$/.test(raw.hospital_code)) {
               setHospitalCode(raw.hospital_code);
             }
@@ -130,10 +142,11 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
           }
         });
 
-      // Clean URL parameter without page reload
-      const cleanUrl = new URL(window.location.href);
-      cleanUrl.searchParams.delete('bms-session-id');
-      window.history.replaceState(window.history.state, '', cleanUrl.toString());
+      if (typeof window !== 'undefined' && window.location.search.includes('bms-session-id')) {
+        const cleanUrl = new URL(window.location.href);
+        cleanUrl.searchParams.delete('bms-session-id');
+        window.history.replaceState(window.history.state, '', cleanUrl.toString());
+      }
     }
 
     return () => {

@@ -334,8 +334,7 @@ LEFT JOIN finance_per_an a ON a.an = t.an
 ORDER BY
   TO_CHAR(t.dchdate, 'YYYY-MM'),
   fwa.first_ward,
-  t.dchdate DESC
-LIMIT 200;`;
+  t.dchdate DESC;`;
 
 export async function retrieveBmsSession(sessionId: string): Promise<BmsSessionRawResponse> {
   const trimmed = sessionId.trim();
@@ -360,6 +359,79 @@ export function extractConnectionConfig(session: BmsSessionRawResponse): BmsConn
     databaseSupportStatus: databaseType === 'postgresql' ? 'supported' : 'unsupported',
     appIdentifier: APP_IDENTIFIER,
   };
+}
+
+export const BMS_SESSION_STORAGE_KEY = 'bms-session-id';
+export const COOKIE_EXPIRY_DAYS = 7;
+
+export function getStoredBmsSessionId(): string {
+  if (typeof window !== 'undefined') {
+    // 1. URL search param
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlSid = urlParams.get('bms-session-id')?.trim() || urlParams.get('sessionId')?.trim();
+    if (urlSid) return urlSid;
+
+    // 2. localStorage
+    try {
+      const localSid = localStorage.getItem(BMS_SESSION_STORAGE_KEY)?.trim();
+      if (localSid) return localSid;
+    } catch {
+      // localStorage may be unavailable
+    }
+
+    // 3. Document Cookie
+    try {
+      const match = document.cookie.match(new RegExp(`(?:^|; )${BMS_SESSION_STORAGE_KEY}=([^;]*)`));
+      if (match && match[1]) {
+        const cookieSid = decodeURIComponent(match[1]).trim();
+        if (cookieSid) return cookieSid;
+      }
+    } catch {
+      // Cookie parsing error
+    }
+  }
+
+  // 4. Vite / Process Environment variables
+  const envObj = (import.meta as unknown as { env?: Record<string, string> })?.env;
+  const envSid = envObj?.VITE_BMS_SESSION_ID || envObj?.BMS_SESSION_ID;
+  if (envSid && typeof envSid === 'string') {
+    return envSid.trim();
+  }
+
+  return '';
+}
+
+export function persistBmsSessionId(sessionId: string): void {
+  const clean = sessionId.trim();
+  if (!clean || typeof window === 'undefined') return;
+
+  try {
+    localStorage.setItem(BMS_SESSION_STORAGE_KEY, clean);
+  } catch {
+    // ignore
+  }
+
+  try {
+    const expiryDate = new Date();
+    expiryDate.setDate(expiryDate.getDate() + COOKIE_EXPIRY_DAYS);
+    document.cookie = `${BMS_SESSION_STORAGE_KEY}=${encodeURIComponent(clean)}; expires=${expiryDate.toUTCString()}; path=/; SameSite=Lax`;
+  } catch {
+    // ignore
+  }
+}
+
+export function removeStoredBmsSessionId(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(BMS_SESSION_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+  try {
+    document.cookie = `${BMS_SESSION_STORAGE_KEY}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`;
+  } catch {
+    // ignore
+  }
 }
 
 export async function executeSqlViaApi(
@@ -787,9 +859,12 @@ export async function fetchCaseWorklist(
     return [];
   }
 
+  const start = params.dstart || '2023-10-01';
+  const end = params.dend || '2026-09-30';
+
   const queryParams: Record<string, { value: string | number; value_type: string }> = {
-    dstart: { value: params.dstart, value_type: 'date' },
-    dend: { value: params.dend, value_type: 'date' },
+    dstart: { value: start, value_type: 'date' },
+    dend: { value: end, value_type: 'date' },
   };
 
   const response = await executeSqlViaApi(

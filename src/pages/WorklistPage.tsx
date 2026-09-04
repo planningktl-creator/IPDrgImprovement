@@ -19,7 +19,6 @@ import {
   getFiscalYearRange,
   getFiscalMonthRange,
   THAI_FISCAL_MONTHS,
-  getCurrentFiscalYearRange,
 } from '@/utils/dateUtils';
 import { auditClinicalCase } from '@/audit/clinicalAuditEngine';
 
@@ -40,14 +39,14 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
   const currentFiscalYear = useMemo(() => getThaiFiscalYear(), []);
   const availableFiscalYears = useMemo(() => getRecentFiscalYears(6), []);
 
-  const [selectedFiscalYear, setSelectedFiscalYear] = useState<number>(currentFiscalYear);
+  // Default to user query date range: 2023-10-01 to 2026-09-30 (covering FY 2567-2569)
+  const [selectedFiscalYear, setSelectedFiscalYear] = useState<number | 'query_all'>('query_all');
   const [selectedFiscalMonth, setSelectedFiscalMonth] = useState<number | 'all'>('all');
   const [showCustomDate, setShowCustomDate] = useState<boolean>(false);
 
-  // Dynamic Date range based on Fiscal selections
-  const initialDateRange = useMemo(() => getCurrentFiscalYearRange(), []);
-  const [dstart, setDstart] = useState<string>(initialDateRange.dstart);
-  const [dend, setDend] = useState<string>(initialDateRange.dend);
+  // Dynamic Date range based on user's query
+  const [dstart, setDstart] = useState<string>('2023-10-01');
+  const [dend, setDend] = useState<string>('2026-09-30');
 
   // Dropdown filter states
   const [statusFilter, setStatusFilter] = useState<'all' | 'uncoded' | 'coded'>('all');
@@ -65,24 +64,38 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleFiscalYearChange = (year: number) => {
-    setSelectedFiscalYear(year);
-    setSelectedFiscalMonth('all');
-    const range = getFiscalYearRange(year, false);
-    setDstart(range.dstart);
-    setDend(range.dend);
+  const handleFiscalYearChange = (yearVal: string) => {
+    if (yearVal === 'query_all') {
+      setSelectedFiscalYear('query_all');
+      setSelectedFiscalMonth('all');
+      setDstart('2023-10-01');
+      setDend('2026-09-30');
+    } else {
+      const year = parseInt(yearVal, 10);
+      setSelectedFiscalYear(year);
+      setSelectedFiscalMonth('all');
+      const range = getFiscalYearRange(year, false);
+      setDstart(range.dstart);
+      setDend(range.dend);
+    }
   };
 
   const handleFiscalMonthChange = (monthVal: string) => {
     if (monthVal === 'all') {
       setSelectedFiscalMonth('all');
-      const range = getFiscalYearRange(selectedFiscalYear, false);
-      setDstart(range.dstart);
-      setDend(range.dend);
+      if (selectedFiscalYear === 'query_all') {
+        setDstart('2023-10-01');
+        setDend('2026-09-30');
+      } else {
+        const range = getFiscalYearRange(selectedFiscalYear, false);
+        setDstart(range.dstart);
+        setDend(range.dend);
+      }
     } else {
       const m = parseInt(monthVal, 10);
       setSelectedFiscalMonth(m);
-      const range = getFiscalMonthRange(selectedFiscalYear, m);
+      const targetYear = selectedFiscalYear === 'query_all' ? currentFiscalYear : selectedFiscalYear;
+      const range = getFiscalMonthRange(targetYear, m);
       setDstart(range.dstart);
       setDend(range.dend);
     }
@@ -357,7 +370,7 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
             </label>
             <select
               value={selectedFiscalYear}
-              onChange={(e) => handleFiscalYearChange(parseInt(e.target.value, 10))}
+              onChange={(e) => handleFiscalYearChange(e.target.value)}
               style={{
                 width: '100%',
                 padding: '8px 12px',
@@ -371,6 +384,9 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
                 outline: 'none',
               }}
             >
+              <option value="query_all">
+                ทั้งหมดตาม Query (2567-2569: 2023-10-01 ถึง 2026-09-30)
+              </option>
               {availableFiscalYears.map((year) => (
                 <option key={year} value={year}>
                   ปีงบประมาณ {year} {year === currentFiscalYear ? '(ปัจจุบัน)' : ''}
@@ -703,9 +719,12 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
                   return (
                     <tr
                       key={c.an}
+                      onClick={() => onSelectCaseForOptimization(c.an || '')}
+                      title="คลิกแถวเพื่อส่งต่อเข้าสู่หน้าวิเคราะห์ DRG ทันที"
                       style={{
                         borderBottom: '1px solid #f1f5f9',
                         transition: 'background-color 0.15s ease',
+                        cursor: 'pointer',
                       }}
                       onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f8fafc')}
                       onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#ffffff')}

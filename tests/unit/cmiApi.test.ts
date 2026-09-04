@@ -128,3 +128,15 @@ describe('retrieveBmsSession', () => {
     expect(config.databaseType).toBe('postgresql');
   });
 });
+
+describe('Session Persistence Utilities', () => {
+  it('persists and retrieves session ID from localStorage and clears on remove', async () => {
+    const { persistBmsSessionId, getStoredBmsSessionId, removeStoredBmsSessionId } = await import('@/services/cmiApi');
+
+    persistBmsSessionId('test-session-persist-456');
+    expect(getStoredBmsSessionId()).toBe('test-session-persist-456');
+
+    removeStoredBmsSessionId();
+    expect(getStoredBmsSessionId()).toBe('');
+  });
+});

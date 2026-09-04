@@ -4,6 +4,9 @@ import { OptimizerPage } from './pages/OptimizerPage';
 import {
   retrieveBmsSession,
   extractConnectionConfig,
+  getStoredBmsSessionId,
+  persistBmsSessionId,
+  removeStoredBmsSessionId,
   type BmsConnectionConfig,
 } from './services/cmiApi';
 import { ClipboardList, Sparkles, Database } from 'lucide-react';
@@ -12,19 +15,15 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'worklist' | 'optimizer'>('worklist');
   const [selectedAn, setSelectedAn] = useState<string>('');
 
-  // Shared BMS Session state
-  const [bmsSessionId, setBmsSessionId] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return new URLSearchParams(window.location.search).get('bms-session-id')?.trim() || '';
-    }
-    return '';
-  });
+  // Shared BMS Session state with auto-persistence across page loads
+  const [bmsSessionId, setBmsSessionId] = useState<string>(() => getStoredBmsSessionId());
   const [connectionConfig, setConnectionConfig] = useState<BmsConnectionConfig | null>(null);
   const [sessionStatus, setSessionStatus] = useState<'idle' | 'connected' | 'demo' | 'error'>('idle');
 
   const handleConnectSession = async (sid: string) => {
     const trimmed = sid.trim();
     if (!trimmed) {
+      removeStoredBmsSessionId();
       setConnectionConfig(null);
       setSessionStatus('idle');
       return;
@@ -35,6 +34,7 @@ export const App: React.FC = () => {
       const conf = extractConnectionConfig(raw);
       setConnectionConfig(conf);
       setBmsSessionId(trimmed);
+      persistBmsSessionId(trimmed);
       setSessionStatus('connected');
     } catch {
       setSessionStatus('error');
@@ -44,12 +44,17 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     let ignore = false;
-    if (bmsSessionId) {
-      retrieveBmsSession(bmsSessionId)
+    const initialSid = bmsSessionId || getStoredBmsSessionId();
+    if (initialSid) {
+      if (initialSid !== bmsSessionId) {
+        setBmsSessionId(initialSid);
+      }
+      retrieveBmsSession(initialSid)
         .then((raw) => {
           if (!ignore) {
             const conf = extractConnectionConfig(raw);
             setConnectionConfig(conf);
+            persistBmsSessionId(initialSid);
             setSessionStatus('connected');
           }
         })
@@ -59,9 +64,11 @@ export const App: React.FC = () => {
           }
         });
 
-      const cleanUrl = new URL(window.location.href);
-      cleanUrl.searchParams.delete('bms-session-id');
-      window.history.replaceState(window.history.state, '', cleanUrl.toString());
+      if (typeof window !== 'undefined' && window.location.search.includes('bms-session-id')) {
+        const cleanUrl = new URL(window.location.href);
+        cleanUrl.searchParams.delete('bms-session-id');
+        window.history.replaceState(window.history.state, '', cleanUrl.toString());
+      }
     }
 
     return () => {
