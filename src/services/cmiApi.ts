@@ -113,7 +113,7 @@ const MASKED_PATIENT_FIELDS = `
   )), '') AS ptname,
 `;
 
-const WORKLIST_CTES = `WITH params AS (
+const WORKLIST_BASE_CTES = `WITH params AS (
   SELECT
     CAST(:dstart AS date) AS dstart,
     CAST(:dend AS date) AS dend
@@ -127,48 +127,29 @@ target_cases AS (
     AND i.dchdate < ((SELECT dend FROM params) + INTERVAL '1 day')
   ORDER BY i.an, i.dchdate DESC NULLS LAST, i.regdate DESC NULLS LAST
 ),
+pdx_per_an AS (
+  SELECT DISTINCT ON (d.an)
+    d.an,
+    d.icd10 AS pdx
+  FROM iptdiag d
+  JOIN target_cases t ON t.an = d.an
+  WHERE d.diagtype = '1' AND d.icd10 IS NOT NULL
+  ORDER BY d.an, d.diag_no ASC NULLS LAST, d.icd10 ASC
+),
 first_ward_per_an AS (
-  SELECT t.an, COALESCE(fm.oward, t.ward) AS first_ward
-  FROM target_cases t
-  LEFT JOIN LATERAL (
-    SELECT bm.oward
-    FROM iptbedmove bm
-    WHERE bm.an = t.an
-    ORDER BY bm.movedate ASC NULLS LAST, bm.movetime ASC NULLS LAST, bm.oward ASC NULLS LAST
-    LIMIT 1
-  ) fm ON TRUE
+  SELECT DISTINCT ON (bm.an)
+    bm.an,
+    bm.oward AS first_ward
+  FROM iptbedmove bm
+  JOIN target_cases t ON t.an = bm.an
+  ORDER BY bm.an, bm.movedate ASC NULLS LAST, bm.movetime ASC NULLS LAST
 ),
-diag_per_an AS (
+candidate_cases AS (
   SELECT
-    an,
-    MAX(CASE WHEN diagtype = '1' THEN icd10 END) AS pdx,
-${SdxSelectWorklist},
-    MAX(CASE WHEN diagtype = '3' THEN icd10 END) AS ext_cause
-  FROM iptdiag
-  WHERE an IN (SELECT an FROM target_cases)
-  GROUP BY an
-),
-proc_per_an AS (
-  SELECT
-    an,
-${ProcSelectWorklist}
-  FROM iptoprt
-  WHERE an IN (SELECT an FROM target_cases)
-  GROUP BY an
-),
-finance_per_an AS (
-  SELECT
-    an,
-    MAX(income) AS income,
-    MAX(uc_money) AS uc_money,
-    MAX(paid_money) AS paid_money,
-    MAX(remain_money) AS remain_money
-  FROM an_stat
-  WHERE an IN (SELECT an FROM target_cases)
-  GROUP BY an
-),
-enriched_cases AS (
-  SELECT
+    t.an, t.hn, t.ward AS last_ward, t.pttype,
+    t.regdate AS admdate, t.dchdate,
+    CAST(t.dchdate AS date) - CAST(t.regdate AS date) AS los,
+    t.dchtype, t.dchstts, t.drg, t.mdc, t.rw, t.adjrw, t.grouper_err,
     TO_CHAR(t.dchdate, 'YYYY-MM') AS year_month,
     CASE WHEN EXTRACT(MONTH FROM t.dchdate)::int >= 10
       THEN EXTRACT(YEAR FROM t.dchdate)::int + 544
@@ -181,27 +162,23 @@ enriched_cases AS (
     CASE WHEN EXTRACT(MONTH FROM t.dchdate)::int >= 10
       THEN EXTRACT(MONTH FROM t.dchdate)::int - 9
       ELSE EXTRACT(MONTH FROM t.dchdate)::int + 3 END AS fiscal_month,
-    fwa.first_ward, fw.name AS first_ward_name,
-    t.ward AS last_ward, lw.name AS last_ward_name,
-    t.an,
-${MASKED_PATIENT_FIELDS}
+    COALESCE(fwa.first_ward, t.ward) AS first_ward,
+    fw.name AS first_ward_name,
+    lw.name AS last_ward_name,
     p.sex,
     CASE WHEN p.birthday IS NOT NULL AND t.regdate IS NOT NULL
       THEN EXTRACT(YEAR FROM AGE(CAST(t.regdate AS date), CAST(p.birthday AS date)))::int END AS age,
-    t.pttype, pt.name AS pttype_name,
-    t.regdate AS admdate, t.dchdate,
-    CAST(t.dchdate AS date) - CAST(t.regdate AS date) AS los,
-    t.dchtype, t.dchstts, t.drg, t.mdc, t.rw, t.adjrw, t.grouper_err,
-    dx.pdx,
-    dx.sdx1, dx.sdx2, dx.sdx3, dx.sdx4, dx.sdx5, dx.sdx6,
-    dx.sdx7, dx.sdx8, dx.sdx9, dx.sdx10, dx.sdx11, dx.sdx12,
-    dx.ext_cause,
-    pr.proc1, pr.proc2, pr.proc3, pr.proc4, pr.proc5, pr.proc6,
-    pr.proc7, pr.proc8, pr.proc9, pr.proc10, pr.proc11, pr.proc12,
-    ROUND(COALESCE(a.income, 0)::numeric, 2) AS income,
-    ROUND(COALESCE(a.uc_money, 0)::numeric, 2) AS uc_money,
-    ROUND(COALESCE(a.paid_money, 0)::numeric, 2) AS paid_money,
-    ROUND(COALESCE(a.remain_money, 0)::numeric, 2) AS remain_money,
+    pt.name AS pttype_name,
+    CASE
+      WHEN p.hn IS NULL OR LENGTH(TRIM(p.hn)) <= 4 THEN '***'
+      ELSE LEFT(TRIM(p.hn), 2) || '***' || RIGHT(TRIM(p.hn), 2)
+    END AS masked_hn,
+    NULLIF(TRIM(CONCAT_WS(' ',
+      NULLIF(p.pname, ''),
+      CASE WHEN NULLIF(TRIM(p.fname), '') IS NULL THEN NULL ELSE LEFT(TRIM(p.fname), 1) || '***' END,
+      CASE WHEN NULLIF(TRIM(p.lname), '') IS NULL THEN NULL ELSE LEFT(TRIM(p.lname), 1) || '***' END
+    )), '') AS ptname,
+    pdx.pdx,
     CASE
       WHEN (t.drg IS NULL OR t.drg = '' OR t.drg = '-')
        AND (t.adjrw IS NULL OR t.adjrw = 0)
@@ -213,17 +190,15 @@ ${MASKED_PATIENT_FIELDS}
       ELSE 'other' END AS payer_scheme
   FROM target_cases t
   LEFT JOIN first_ward_per_an fwa ON fwa.an = t.an
-  LEFT JOIN ward fw ON fw.ward = fwa.first_ward
+  LEFT JOIN ward fw ON fw.ward = COALESCE(fwa.first_ward, t.ward)
   LEFT JOIN ward lw ON lw.ward = t.ward
   LEFT JOIN patient p ON p.hn = t.hn
   LEFT JOIN pttype pt ON pt.pttype = t.pttype
-  LEFT JOIN diag_per_an dx ON dx.an = t.an
-  LEFT JOIN proc_per_an pr ON pr.an = t.an
-  LEFT JOIN finance_per_an a ON a.an = t.an
+  LEFT JOIN pdx_per_an pdx ON pdx.an = t.an
 ),
 filtered_cases AS (
   SELECT *
-  FROM enriched_cases
+  FROM candidate_cases
   WHERE (:ward = '' OR first_ward = :ward OR last_ward = :ward)
     AND (
       :status_filter = 'all'
@@ -232,34 +207,98 @@ filtered_cases AS (
     )
     AND (:scheme = 'all' OR payer_scheme = :scheme)
     AND (
-      :search = '' OR LOWER(CONCAT_WS(' ', an, hn, ptname, pdx, first_ward_name, last_ward_name)) LIKE LOWER('%' || :search || '%')
+      :search = '' OR LOWER(CONCAT_WS(' ', an, masked_hn, ptname, pdx, first_ward_name, last_ward_name)) LIKE LOWER('%' || :search || '%')
     )
 )
 `;
 
-export const CASE_WORKLIST_SQL = `${WORKLIST_CTES}
-SELECT *
-FROM filtered_cases
-WHERE (
-  NULLIF(:cursor_date, '') IS NULL
-  OR dchdate < CAST(NULLIF(:cursor_date, '') AS timestamp)
-  OR (dchdate = CAST(NULLIF(:cursor_date, '') AS timestamp) AND an > :cursor_an)
+export const CASE_WORKLIST_SQL = `${WORKLIST_BASE_CTES},
+paged_cases AS (
+  SELECT *
+  FROM filtered_cases
+  WHERE (
+    NULLIF(:cursor_date, '') IS NULL
+    OR dchdate < CAST(NULLIF(:cursor_date, '') AS timestamp)
+    OR (dchdate = CAST(NULLIF(:cursor_date, '') AS timestamp) AND an > :cursor_an)
+  )
+  ORDER BY dchdate DESC NULLS LAST, an ASC
+  LIMIT (:page_limit + 1)
+),
+diag_per_page AS (
+  SELECT
+    an,
+${SdxSelectWorklist},
+    MAX(CASE WHEN diagtype = '3' THEN icd10 END) AS ext_cause
+  FROM iptdiag
+  WHERE an IN (SELECT an FROM paged_cases)
+  GROUP BY an
+),
+proc_per_page AS (
+  SELECT
+    an,
+${ProcSelectWorklist}
+  FROM iptoprt
+  WHERE an IN (SELECT an FROM paged_cases)
+  GROUP BY an
+),
+finance_per_page AS (
+  SELECT
+    an,
+    MAX(income) AS income,
+    MAX(uc_money) AS uc_money,
+    MAX(paid_money) AS paid_money,
+    MAX(remain_money) AS remain_money
+  FROM an_stat
+  WHERE an IN (SELECT an FROM paged_cases)
+  GROUP BY an
 )
-ORDER BY dchdate DESC NULLS LAST, an ASC
-LIMIT (:page_limit + 1);`;
+SELECT
+  p.year_month, p.year_be, p.month_th, p.fiscal_month,
+  p.first_ward, p.first_ward_name,
+  p.last_ward, p.last_ward_name,
+  p.an, p.masked_hn AS hn, p.ptname, p.sex, p.age,
+  p.pttype, p.pttype_name,
+  p.admdate, p.dchdate, p.los,
+  p.dchtype, p.dchstts, p.drg, p.mdc, p.rw, p.adjrw, p.grouper_err,
+  p.pdx,
+  dx.sdx1, dx.sdx2, dx.sdx3, dx.sdx4, dx.sdx5, dx.sdx6,
+  dx.sdx7, dx.sdx8, dx.sdx9, dx.sdx10, dx.sdx11, dx.sdx12,
+  dx.ext_cause,
+  pr.proc1, pr.proc2, pr.proc3, pr.proc4, pr.proc5, pr.proc6,
+  pr.proc7, pr.proc8, pr.proc9, pr.proc10, pr.proc11, pr.proc12,
+  ROUND(COALESCE(f.income, 0)::numeric, 2) AS income,
+  ROUND(COALESCE(f.uc_money, 0)::numeric, 2) AS uc_money,
+  ROUND(COALESCE(f.paid_money, 0)::numeric, 2) AS paid_money,
+  ROUND(COALESCE(f.remain_money, 0)::numeric, 2) AS remain_money,
+  p.remark,
+  p.payer_scheme
+FROM paged_cases p
+LEFT JOIN diag_per_page dx ON dx.an = p.an
+LEFT JOIN proc_per_page pr ON pr.an = p.an
+LEFT JOIN finance_per_page f ON f.an = p.an
+ORDER BY p.dchdate DESC NULLS LAST, p.an ASC;`;
 
-export const CASE_COUNT_SQL = `${WORKLIST_CTES}
+export const CASE_COUNT_SQL = `${WORKLIST_BASE_CTES}
 SELECT COUNT(*)::int AS total_count
 FROM filtered_cases;`;
 
-export const WORKLIST_SUMMARY_SQL = `${WORKLIST_CTES}
+export const WORKLIST_SUMMARY_SQL = `${WORKLIST_BASE_CTES},
+finance_summary AS (
+  SELECT
+    an,
+    MAX(income) AS income
+  FROM an_stat
+  WHERE an IN (SELECT an FROM filtered_cases)
+  GROUP BY an
+)
 SELECT
   COUNT(*)::int AS total_count,
   COUNT(*) FILTER (WHERE pdx IS NULL OR pdx = '' OR remark = 'ยังไม่ลงรหัสโรค')::int AS uncoded_count,
   COUNT(*) FILTER (WHERE pdx IS NOT NULL AND pdx <> '' AND remark <> 'ยังไม่ลงรหัสโรค')::int AS coded_count,
-  COALESCE(SUM(COALESCE(adjrw, 0)), 0)::numeric AS total_adjrw,
-  COALESCE(SUM(COALESCE(income, 0)), 0)::numeric AS total_income
-FROM filtered_cases;`;
+  COALESCE(SUM(COALESCE(f.adjrw, 0)), 0)::numeric AS total_adjrw,
+  COALESCE(SUM(COALESCE(fin.income, 0)), 0)::numeric AS total_income
+FROM filtered_cases f
+LEFT JOIN finance_summary fin ON fin.an = f.an;`;
 
 export const CASE_DETAIL_SQL = `WITH target_case AS (
   SELECT DISTINCT ON (i.an)
@@ -345,11 +384,63 @@ WHERE o.an = :an
 ORDER BY o.rxdate DESC, o.rxtime DESC, o.hos_guid
 LIMIT :page_limit;`;
 
+export const WORKLIST_CTES = WORKLIST_BASE_CTES;
+
 export const USAGE_PAGE_SQL = USAGE_SQL;
-export const CASE_EXPORT_SQL = `${WORKLIST_CTES}
-SELECT *
-FROM filtered_cases
-ORDER BY dchdate DESC NULLS LAST, an ASC
+export const CASE_EXPORT_SQL = `${WORKLIST_BASE_CTES},
+diag_per_export AS (
+  SELECT
+    an,
+${SdxSelectWorklist},
+    MAX(CASE WHEN diagtype = '3' THEN icd10 END) AS ext_cause
+  FROM iptdiag
+  WHERE an IN (SELECT an FROM filtered_cases)
+  GROUP BY an
+),
+proc_per_export AS (
+  SELECT
+    an,
+${ProcSelectWorklist}
+  FROM iptoprt
+  WHERE an IN (SELECT an FROM filtered_cases)
+  GROUP BY an
+),
+finance_per_export AS (
+  SELECT
+    an,
+    MAX(income) AS income,
+    MAX(uc_money) AS uc_money,
+    MAX(paid_money) AS paid_money,
+    MAX(remain_money) AS remain_money
+  FROM an_stat
+  WHERE an IN (SELECT an FROM filtered_cases)
+  GROUP BY an
+)
+SELECT
+  p.year_month, p.year_be, p.month_th, p.fiscal_month,
+  p.first_ward, p.first_ward_name,
+  p.last_ward, p.last_ward_name,
+  p.an, p.masked_hn AS hn, p.ptname, p.sex, p.age,
+  p.pttype, p.pttype_name,
+  p.admdate, p.dchdate, p.los,
+  p.dchtype, p.dchstts, p.drg, p.mdc, p.rw, p.adjrw, p.grouper_err,
+  p.pdx,
+  dx.sdx1, dx.sdx2, dx.sdx3, dx.sdx4, dx.sdx5, dx.sdx6,
+  dx.sdx7, dx.sdx8, dx.sdx9, dx.sdx10, dx.sdx11, dx.sdx12,
+  dx.ext_cause,
+  pr.proc1, pr.proc2, pr.proc3, pr.proc4, pr.proc5, pr.proc6,
+  pr.proc7, pr.proc8, pr.proc9, pr.proc10, pr.proc11, pr.proc12,
+  ROUND(COALESCE(f.income, 0)::numeric, 2) AS income,
+  ROUND(COALESCE(f.uc_money, 0)::numeric, 2) AS uc_money,
+  ROUND(COALESCE(f.paid_money, 0)::numeric, 2) AS paid_money,
+  ROUND(COALESCE(f.remain_money, 0)::numeric, 2) AS remain_money,
+  p.remark,
+  p.payer_scheme
+FROM filtered_cases p
+LEFT JOIN diag_per_export dx ON dx.an = p.an
+LEFT JOIN proc_per_export pr ON pr.an = p.an
+LEFT JOIN finance_per_export f ON f.an = p.an
+ORDER BY p.dchdate DESC NULLS LAST, p.an ASC
 LIMIT :export_limit;`;
 
 export const QUERY_REGISTRY: Readonly<Record<QueryRegistryKey, string>> = Object.freeze({
@@ -720,11 +811,10 @@ export async function fetchCasePage(input: WorklistQueryParams, config?: BmsConn
   if (!config?.apiUrl) return { items: [], nextCursor: null, hasMore: false, count: 0, totalCount: 0, summary: summarizeCases([], rates), fetchedAt: new Date().toISOString() };
 
   const apiParams = queryParamsForWorklist(params, rates);
-  const [pageRows, countRows, summaryRows] = await Promise.all([
-    executeCmiQuery('casePage', config, apiParams, opts.signal),
-    executeCmiQuery('caseCount', config, apiParams, opts.signal),
-    executeCmiQuery('worklistSummary', config, apiParams, opts.signal),
-  ]);
+  // Execute sequentially to prevent HTTP 409 concurrency lock on BMS API gateway
+  const pageRows = await executeCmiQuery('casePage', config, apiParams, opts.signal);
+  const countRows = await executeCmiQuery('caseCount', config, apiParams, opts.signal).catch(() => []);
+  const summaryRows = await executeCmiQuery('worklistSummary', config, apiParams, opts.signal).catch(() => []);
   const rows = pageRows.map((row) => mapRawRowToCmiCaseRow(row));
   const hasMore = rows.length > params.pageSize;
   const items = hasMore ? rows.slice(0, params.pageSize) : rows;
