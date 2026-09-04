@@ -1,4 +1,4 @@
-import type { CmiCaseRow, UsageLite } from '@/cmi/caseContract';
+import type { CmiCaseRow, UsageLite, WorklistQueryParams } from '@/cmi/caseContract';
 
 export const PASTE_JSON_URL = 'https://hosxp.net/phapi/PasteJSON';
 export const APP_IDENTIFIER = 'DRG.Optimizer.React';
@@ -144,6 +144,198 @@ WHERE o.an = :an
 ORDER BY o.rxdate DESC, o.rxtime DESC, o.hos_guid
 LIMIT 300;`;
 
+/**
+ * Inpatient Case Worklist SQL Query
+ * Features 12 Secondary Diagnoses (sdx1..sdx12) and 12 Procedures (proc1..proc12)
+ */
+export const CASE_WORKLIST_SQL = `WITH params AS (
+  SELECT
+    DATE :dstart AS dstart,
+    DATE :dend   AS dend
+),
+
+target_cases AS (
+  SELECT DISTINCT ON (i.an)
+    i.an,
+    i.hn,
+    i.ward,
+    i.pttype,
+    i.regdate,
+    i.dchdate,
+    i.dchtype,
+    i.dchstts,
+    i.drg,
+    i.mdc,
+    i.rw,
+    i.adjrw,
+    i.grouper_err
+  FROM ipt i
+  WHERE i.dchdate >= (SELECT dstart FROM params)
+    AND i.dchdate < ((SELECT dend FROM params) + INTERVAL '1 day')
+  ORDER BY i.an, i.dchdate DESC NULLS LAST, i.regdate DESC NULLS LAST
+),
+
+first_ward_per_an AS (
+  SELECT
+    t.an,
+    COALESCE(fm.oward, t.ward) AS first_ward
+  FROM target_cases t
+  LEFT JOIN LATERAL (
+    SELECT bm.oward
+    FROM iptbedmove bm
+    WHERE bm.an = t.an
+    ORDER BY bm.movedate ASC NULLS LAST,
+             bm.movetime ASC NULLS LAST,
+             bm.oward ASC NULLS LAST
+    LIMIT 1
+  ) fm ON TRUE
+),
+
+diag_per_an AS (
+  SELECT
+    an,
+    MAX(CASE WHEN diagtype = '1' THEN icd10 END) AS pdx,
+
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 1  THEN icd10 END) AS sdx1,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 2  THEN icd10 END) AS sdx2,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 3  THEN icd10 END) AS sdx3,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 4  THEN icd10 END) AS sdx4,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 5  THEN icd10 END) AS sdx5,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 6  THEN icd10 END) AS sdx6,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 7  THEN icd10 END) AS sdx7,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 8  THEN icd10 END) AS sdx8,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 9  THEN icd10 END) AS sdx9,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 10 THEN icd10 END) AS sdx10,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 11 THEN icd10 END) AS sdx11,
+    MAX(CASE WHEN diagtype = '2' AND diag_no = 12 THEN icd10 END) AS sdx12,
+
+    MAX(CASE WHEN diagtype = '3' THEN icd10 END) AS ext_cause
+  FROM iptdiag
+  WHERE an IN (SELECT an FROM target_cases)
+  GROUP BY an
+),
+
+proc_per_an AS (
+  SELECT
+    an,
+    MAX(CASE WHEN priority = 1  THEN icd9 END) AS proc1,
+    MAX(CASE WHEN priority = 2  THEN icd9 END) AS proc2,
+    MAX(CASE WHEN priority = 3  THEN icd9 END) AS proc3,
+    MAX(CASE WHEN priority = 4  THEN icd9 END) AS proc4,
+    MAX(CASE WHEN priority = 5  THEN icd9 END) AS proc5,
+    MAX(CASE WHEN priority = 6  THEN icd9 END) AS proc6,
+    MAX(CASE WHEN priority = 7  THEN icd9 END) AS proc7,
+    MAX(CASE WHEN priority = 8  THEN icd9 END) AS proc8,
+    MAX(CASE WHEN priority = 9  THEN icd9 END) AS proc9,
+    MAX(CASE WHEN priority = 10 THEN icd9 END) AS proc10,
+    MAX(CASE WHEN priority = 11 THEN icd9 END) AS proc11,
+    MAX(CASE WHEN priority = 12 THEN icd9 END) AS proc12
+  FROM iptoprt
+  WHERE an IN (SELECT an FROM target_cases)
+  GROUP BY an
+),
+
+finance_per_an AS (
+  SELECT
+    an,
+    MAX(income) AS income,
+    MAX(uc_money) AS uc_money,
+    MAX(paid_money) AS paid_money,
+    MAX(remain_money) AS remain_money
+  FROM an_stat
+  WHERE an IN (SELECT an FROM target_cases)
+  GROUP BY an
+)
+
+SELECT
+  TO_CHAR(t.dchdate, 'YYYY-MM') AS year_month,
+
+  CASE
+    WHEN EXTRACT(MONTH FROM t.dchdate)::int >= 10
+    THEN EXTRACT(YEAR FROM t.dchdate)::int + 544
+    ELSE EXTRACT(YEAR FROM t.dchdate)::int + 543
+  END AS year_be,
+
+  CASE EXTRACT(MONTH FROM t.dchdate)::int
+    WHEN 1  THEN 'ม.ค.' WHEN 2  THEN 'ก.พ.' WHEN 3  THEN 'มี.ค.'
+    WHEN 4  THEN 'เม.ย.' WHEN 5  THEN 'พ.ค.' WHEN 6  THEN 'มิ.ย.'
+    WHEN 7  THEN 'ก.ค.' WHEN 8  THEN 'ส.ค.' WHEN 9  THEN 'ก.ย.'
+    WHEN 10 THEN 'ต.ค.' WHEN 11 THEN 'พ.ย.' WHEN 12 THEN 'ธ.ค.'
+  END AS month_th,
+
+  CASE
+    WHEN EXTRACT(MONTH FROM t.dchdate)::int >= 10
+    THEN EXTRACT(MONTH FROM t.dchdate)::int - 9
+    ELSE EXTRACT(MONTH FROM t.dchdate)::int + 3
+  END AS fiscal_month,
+
+  fwa.first_ward,
+  fw.name AS first_ward_name,
+
+  t.ward AS last_ward,
+  lw.name AS last_ward_name,
+
+  t.an,
+  t.hn,
+  NULLIF(TRIM(CONCAT_WS(' ', NULLIF(p.pname, ''), NULLIF(p.fname, ''), NULLIF(p.lname, ''))), '') AS ptname,
+  p.sex,
+
+  CASE
+    WHEN p.birthday IS NOT NULL AND t.regdate IS NOT NULL
+    THEN EXTRACT(YEAR FROM AGE(CAST(t.regdate AS date), CAST(p.birthday AS date)))::int
+  END AS age,
+
+  t.pttype,
+  pt.name AS pttype_name,
+
+  t.regdate AS admdate,
+  t.dchdate,
+  (CAST(t.dchdate AS date) - CAST(t.regdate AS date)) AS los,
+  t.dchtype,
+  t.dchstts,
+
+  t.drg,
+  t.mdc,
+  t.rw,
+  t.adjrw,
+  t.grouper_err,
+
+  dx.pdx,
+  dx.sdx1, dx.sdx2, dx.sdx3, dx.sdx4, dx.sdx5, dx.sdx6,
+  dx.sdx7, dx.sdx8, dx.sdx9, dx.sdx10, dx.sdx11, dx.sdx12,
+  dx.ext_cause,
+
+  pr.proc1, pr.proc2, pr.proc3, pr.proc4, pr.proc5, pr.proc6,
+  pr.proc7, pr.proc8, pr.proc9, pr.proc10, pr.proc11, pr.proc12,
+
+  ROUND(COALESCE(a.income, 0)::numeric, 2) AS income,
+  ROUND(COALESCE(a.uc_money, 0)::numeric, 2) AS uc_money,
+  ROUND(COALESCE(a.paid_money, 0)::numeric, 2) AS paid_money,
+  ROUND(COALESCE(a.remain_money, 0)::numeric, 2) AS remain_money,
+
+  CASE
+    WHEN (t.drg IS NULL OR t.drg = '' OR t.drg = '-')
+     AND (t.adjrw IS NULL OR t.adjrw = 0)
+    THEN 'ยังไม่ลงรหัสโรค'
+    ELSE '-'
+  END AS remark
+
+FROM target_cases t
+LEFT JOIN first_ward_per_an fwa ON fwa.an = t.an
+LEFT JOIN ward fw ON fw.ward = fwa.first_ward
+LEFT JOIN ward lw ON lw.ward = t.ward
+LEFT JOIN patient p ON p.hn = t.hn
+LEFT JOIN pttype pt ON pt.pttype = t.pttype
+LEFT JOIN diag_per_an dx ON dx.an = t.an
+LEFT JOIN proc_per_an pr ON pr.an = t.an
+LEFT JOIN finance_per_an a ON a.an = t.an
+
+ORDER BY
+  TO_CHAR(t.dchdate, 'YYYY-MM'),
+  fwa.first_ward,
+  t.dchdate DESC
+LIMIT 200;`;
+
 export async function retrieveBmsSession(sessionId: string): Promise<BmsSessionRawResponse> {
   const trimmed = sessionId.trim();
   if (!trimmed) throw new Error('Session ID is required');
@@ -198,7 +390,7 @@ export async function executeSqlViaApi(
   return (await res.json()) as { result?: Record<string, unknown>[] };
 }
 
-// Built-in Demo Fixture for testing and demonstration when BMS is offline
+// Built-in Demo Fixtures for testing and demonstration when BMS is offline
 export const DEMO_CASE_DETAIL: CmiCaseRow = {
   an: '1001',
   hn: '0054321',
@@ -262,6 +454,196 @@ export const DEMO_USAGE_ITEMS: UsageLite[] = [
   },
 ];
 
+export const DEMO_WORKLIST_CASES: CmiCaseRow[] = [
+  {
+    an: '1001',
+    hn: '0054321',
+    ptname: 'นาย ประ*** ม***',
+    sex: 'ชาย',
+    age: 68,
+    firstWard: '01',
+    firstWardName: 'หอผู้ป่วยอายุรกรรมชาย',
+    lastWard: '01',
+    lastWardName: 'หอผู้ป่วยอายุรกรรมชาย',
+    admdate: '2026-08-28',
+    dchdate: '2026-09-03',
+    los: 6,
+    dchtype: '1',
+    dchstts: '1',
+    drg: '04010',
+    mdc: '04',
+    rw: 0.985,
+    adjrw: 1.052,
+    pdx: 'J189',
+    sdx1: 'I10',
+    sdx2: null,
+    sdx3: null,
+    sdx4: null,
+    proc1: '9914',
+    proc2: null,
+    proc3: null,
+    income: 18500,
+    remainMoney: 0,
+    remark: '-',
+  },
+  {
+    an: '1002',
+    hn: '0067890',
+    ptname: 'นาง สม*** ท***',
+    sex: 'หญิง',
+    age: 54,
+    firstWard: '02',
+    firstWardName: 'หอผู้ป่วยอายุรกรรมหญิง',
+    lastWard: '02',
+    lastWardName: 'หอผู้ป่วยอายุรกรรมหญิง',
+    admdate: '2026-08-30',
+    dchdate: '2026-09-02',
+    los: 3,
+    dchtype: '1',
+    dchstts: '1',
+    drg: null,
+    mdc: null,
+    rw: null,
+    adjrw: 0,
+    pdx: null,
+    sdx1: null,
+    sdx2: null,
+    sdx3: null,
+    sdx4: null,
+    proc1: null,
+    proc2: null,
+    proc3: null,
+    income: 8200,
+    remainMoney: 0,
+    remark: 'ยังไม่ลงรหัสโรค',
+  },
+  {
+    an: '1003',
+    hn: '0071234',
+    ptname: 'นาย วร*** ส***',
+    sex: 'ชาย',
+    age: 62,
+    firstWard: '03',
+    firstWardName: 'หอผู้ป่วยศัลยกรรม',
+    lastWard: '03',
+    lastWardName: 'หอผู้ป่วยศัลยกรรม',
+    admdate: '2026-08-25',
+    dchdate: '2026-09-01',
+    los: 7,
+    dchtype: '1',
+    dchstts: '1',
+    drg: '18010',
+    mdc: '18',
+    rw: 2.45,
+    adjrw: 2.85,
+    pdx: 'A419',
+    sdx1: 'E119',
+    sdx2: 'N183',
+    sdx3: 'I10',
+    sdx4: null,
+    proc1: '9914',
+    proc2: null,
+    proc3: null,
+    income: 42100,
+    remainMoney: 0,
+    remark: '-',
+  },
+  {
+    an: '1004',
+    hn: '0089912',
+    ptname: 'ด.ช. ปั*** ค***',
+    sex: 'ชาย',
+    age: 8,
+    firstWard: '05',
+    firstWardName: 'หอผู้ป่วยกุมารเวชกรรม',
+    lastWard: '05',
+    lastWardName: 'หอผู้ป่วยกุมารเวชกรรม',
+    admdate: '2026-09-01',
+    dchdate: '2026-09-03',
+    los: 2,
+    dchtype: '1',
+    dchstts: '1',
+    drg: '03050',
+    mdc: '03',
+    rw: 0.51,
+    adjrw: 0.54,
+    pdx: 'J069',
+    sdx1: null,
+    sdx2: null,
+    sdx3: null,
+    sdx4: null,
+    proc1: null,
+    proc2: null,
+    proc3: null,
+    income: 4500,
+    remainMoney: 0,
+    remark: '-',
+  },
+  {
+    an: '1005',
+    hn: '0091122',
+    ptname: 'น.ส. กา*** ร***',
+    sex: 'หญิง',
+    age: 39,
+    firstWard: '04',
+    firstWardName: 'หอผู้ป่วยสูติ-นรีเวชกรรม',
+    lastWard: '04',
+    lastWardName: 'หอผู้ป่วยสูติ-นรีเวชกรรม',
+    admdate: '2026-08-31',
+    dchdate: '2026-09-02',
+    los: 2,
+    dchtype: '1',
+    dchstts: '1',
+    drg: null,
+    mdc: null,
+    rw: null,
+    adjrw: 0,
+    pdx: null,
+    sdx1: null,
+    sdx2: null,
+    sdx3: null,
+    sdx4: null,
+    proc1: null,
+    proc2: null,
+    proc3: null,
+    income: 6900,
+    remainMoney: 0,
+    remark: 'ยังไม่ลงรหัสโรค',
+  },
+  {
+    an: '1006',
+    hn: '0034455',
+    ptname: 'นาย บุญ*** ช***',
+    sex: 'ชาย',
+    age: 72,
+    firstWard: '01',
+    firstWardName: 'หอผู้ป่วยอายุรกรรมชาย',
+    lastWard: '01',
+    lastWardName: 'หอผู้ป่วยอายุรกรรมชาย',
+    admdate: '2026-08-26',
+    dchdate: '2026-09-01',
+    los: 6,
+    dchtype: '1',
+    dchstts: '1',
+    drg: '05011',
+    mdc: '05',
+    rw: 2.85,
+    adjrw: 3.12,
+    pdx: 'I210',
+    sdx1: 'I10',
+    sdx2: 'E119',
+    sdx3: 'N183',
+    sdx4: 'E780',
+    sdx5: 'J449',
+    proc1: '3606',
+    proc2: '8856',
+    proc3: '9914',
+    income: 88500,
+    remainMoney: 0,
+    remark: '-',
+  },
+];
+
 export async function fetchCaseDetail(
   an: string,
   config?: BmsConnectionConfig,
@@ -271,6 +653,10 @@ export async function fetchCaseDetail(
   if (!cleanAn) throw new Error('กรุณาระบุ AN ที่ต้องการตรวจสอบ');
 
   if (opts.useDemoFallback || !config || !config.apiUrl) {
+    const foundDemo = DEMO_WORKLIST_CASES.find((c) => c.an === cleanAn);
+    if (foundDemo) {
+      return { ...foundDemo };
+    }
     if (cleanAn === '1001' || opts.useDemoFallback) {
       return { ...DEMO_CASE_DETAIL, an: cleanAn };
     }
@@ -292,12 +678,72 @@ export async function fetchCaseDetail(
     throw new Error(`ไม่พบข้อมูลเคส AN ${cleanAn} ในระบบ`);
   }
 
+  return mapRawRowToCmiCaseRow(row, cleanAn);
+}
+
+export async function fetchCaseWorklist(
+  params: WorklistQueryParams,
+  config?: BmsConnectionConfig,
+  opts: { signal?: AbortSignal; useDemoFallback?: boolean } = {},
+): Promise<CmiCaseRow[]> {
+  if (opts.useDemoFallback || !config || !config.apiUrl) {
+    let list = [...DEMO_WORKLIST_CASES];
+    if (params.statusFilter === 'uncoded') {
+      list = list.filter((c) => c.remark === 'ยังไม่ลงรหัสโรค' || !c.pdx);
+    } else if (params.statusFilter === 'coded') {
+      list = list.filter((c) => c.remark !== 'ยังไม่ลงรหัสโรค' && Boolean(c.pdx));
+    }
+    if (params.ward) {
+      list = list.filter((c) => c.firstWard === params.ward || c.lastWard === params.ward);
+    }
+    if (params.search) {
+      const q = params.search.trim().toLowerCase();
+      list = list.filter((c) =>
+        (c.an && c.an.toLowerCase().includes(q)) ||
+        (c.hn && c.hn.toLowerCase().includes(q)) ||
+        (c.ptname && c.ptname.toLowerCase().includes(q)) ||
+        (c.pdx && c.pdx.toLowerCase().includes(q)) ||
+        (c.firstWardName && c.firstWardName.toLowerCase().includes(q)),
+      );
+    }
+    return list;
+  }
+
+  const queryParams: Record<string, { value: string | number; value_type: string }> = {
+    dstart: { value: params.dstart, value_type: 'date' },
+    dend: { value: params.dend, value_type: 'date' },
+  };
+
+  const response = await executeSqlViaApi(
+    CASE_WORKLIST_SQL,
+    config,
+    queryParams,
+    opts.signal,
+  );
+
+  const rows = response.result || [];
+  return rows.map((r) => mapRawRowToCmiCaseRow(r));
+}
+
+function mapRawRowToCmiCaseRow(row: Record<string, unknown>, fallbackAn = ''): CmiCaseRow {
   return {
-    an: String(row.an ?? cleanAn),
+    an: String(row.an ?? fallbackAn),
     hn: String(row.hn ?? ''),
     ptname: row.ptname ? String(row.ptname) : null,
     sex: row.sex ? String(row.sex) : null,
     age: typeof row.age === 'number' ? row.age : Number(row.age) || null,
+    pttype: row.pttype ? String(row.pttype) : null,
+    pttypeName: row.pttype_name ? String(row.pttype_name) : null,
+    firstWard: row.first_ward ? String(row.first_ward) : null,
+    firstWardName: row.first_ward_name ? String(row.first_ward_name) : null,
+    lastWard: row.last_ward ? String(row.last_ward) : null,
+    lastWardName: row.last_ward_name ? String(row.last_ward_name) : null,
+    yearMonth: row.year_month ? String(row.year_month) : null,
+    yearBe: typeof row.year_be === 'number' ? row.year_be : Number(row.year_be) || null,
+    monthTh: row.month_th ? String(row.month_th) : null,
+    fiscalMonth: typeof row.fiscal_month === 'number' ? row.fiscal_month : Number(row.fiscal_month) || null,
+    admdate: row.admdate ? String(row.admdate) : undefined,
+    dchdate: row.dchdate ? String(row.dchdate) : undefined,
     los: typeof row.los === 'number' ? row.los : Number(row.los) || 1,
     dchtype: row.dchtype ? String(row.dchtype) : '1',
     dchstts: row.dchstts ? String(row.dchstts) : '1',
@@ -305,15 +751,38 @@ export async function fetchCaseDetail(
     mdc: row.mdc ? String(row.mdc) : null,
     rw: typeof row.rw === 'number' ? row.rw : Number(row.rw) || null,
     adjrw: typeof row.adjrw === 'number' ? row.adjrw : Number(row.adjrw) || null,
+    grouperErr: row.grouper_err ? String(row.grouper_err) : null,
     pdx: row.pdx ? String(row.pdx) : null,
     sdx1: row.sdx1 ? String(row.sdx1) : null,
     sdx2: row.sdx2 ? String(row.sdx2) : null,
     sdx3: row.sdx3 ? String(row.sdx3) : null,
     sdx4: row.sdx4 ? String(row.sdx4) : null,
+    sdx5: row.sdx5 ? String(row.sdx5) : null,
+    sdx6: row.sdx6 ? String(row.sdx6) : null,
+    sdx7: row.sdx7 ? String(row.sdx7) : null,
+    sdx8: row.sdx8 ? String(row.sdx8) : null,
+    sdx9: row.sdx9 ? String(row.sdx9) : null,
+    sdx10: row.sdx10 ? String(row.sdx10) : null,
+    sdx11: row.sdx11 ? String(row.sdx11) : null,
+    sdx12: row.sdx12 ? String(row.sdx12) : null,
     extCause: row.ext_cause ? String(row.ext_cause) : null,
     proc1: row.proc1 ? String(row.proc1) : null,
     proc2: row.proc2 ? String(row.proc2) : null,
     proc3: row.proc3 ? String(row.proc3) : null,
+    proc4: row.proc4 ? String(row.proc4) : null,
+    proc5: row.proc5 ? String(row.proc5) : null,
+    proc6: row.proc6 ? String(row.proc6) : null,
+    proc7: row.proc7 ? String(row.proc7) : null,
+    proc8: row.proc8 ? String(row.proc8) : null,
+    proc9: row.proc9 ? String(row.proc9) : null,
+    proc10: row.proc10 ? String(row.proc10) : null,
+    proc11: row.proc11 ? String(row.proc11) : null,
+    proc12: row.proc12 ? String(row.proc12) : null,
+    income: typeof row.income === 'number' ? row.income : Number(row.income) || 0,
+    ucMoney: typeof row.uc_money === 'number' ? row.uc_money : Number(row.uc_money) || 0,
+    paidMoney: typeof row.paid_money === 'number' ? row.paid_money : Number(row.paid_money) || 0,
+    remainMoney: typeof row.remain_money === 'number' ? row.remain_money : Number(row.remain_money) || 0,
+    remark: row.remark ? String(row.remark) : '-',
   };
 }
 

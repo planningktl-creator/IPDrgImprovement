@@ -1,0 +1,43 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { WorklistPage } from '@/pages/WorklistPage';
+
+describe('WorklistPage Component', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('renders worklist table with summary KPI cards and cases', async () => {
+    const onSelectMock = vi.fn();
+    render(
+      <WorklistPage
+        onSelectCaseForOptimization={onSelectMock}
+        connectionConfig={null}
+        sessionStatus="demo"
+      />,
+    );
+
+    expect(screen.getByText(/ทะเบียนเคสผู้ป่วยใน/i)).toBeInTheDocument();
+
+    // Verify cases are rendered
+    await waitFor(() => {
+      expect(screen.getByText('1001')).toBeInTheDocument();
+      expect(screen.getByText('1002')).toBeInTheDocument();
+      expect(screen.getAllByText(/ยังไม่ลงรหัสโรค/i).length).toBeGreaterThan(0);
+    });
+
+    // Test filter by uncoded
+    const uncodedFilterBtn = screen.getByRole('button', { name: /ยังไม่ลงรหัสโรค/i });
+    fireEvent.click(uncodedFilterBtn);
+
+    await waitFor(() => {
+      expect(screen.queryByText('1001')).not.toBeInTheDocument();
+      expect(screen.getByText('1002')).toBeInTheDocument();
+    });
+
+    // Test clicking "วิเคราะห์ DRG" button triggers callback
+    const optimizeButtons = screen.getAllByRole('button', { name: /วิเคราะห์ DRG/i });
+    fireEvent.click(optimizeButtons[0]);
+    expect(onSelectMock).toHaveBeenCalledWith('1002');
+  });
+});

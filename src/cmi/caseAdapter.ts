@@ -14,7 +14,8 @@ export interface CmiAdapterOptions {
 }
 
 /**
- * Convert a CMI-Dashboard CaseDetail row into a DrgCaseInput for the MOPH Grouper.
+ * Convert a CMI-Dashboard / Worklist CaseDetail row into a DrgCaseInput for the MOPH Grouper.
+ * Supports up to 12 secondary diagnoses (sdx1..sdx12) and 12 procedures (proc1..proc12).
  */
 export function cmiCaseToDrgInput(
   row: CmiCaseRow,
@@ -25,15 +26,41 @@ export function cmiCaseToDrgInput(
     throw new Error('เคสนี้ยังไม่ลง PDx — ต้องมี PDx ก่อนเรียก Grouper');
   }
 
-  const rawSdx = [row.sdx1, row.sdx2, row.sdx3, row.sdx4]
+  const rawSdx = [
+    row.sdx1,
+    row.sdx2,
+    row.sdx3,
+    row.sdx4,
+    row.sdx5,
+    row.sdx6,
+    row.sdx7,
+    row.sdx8,
+    row.sdx9,
+    row.sdx10,
+    row.sdx11,
+    row.sdx12,
+  ]
     .map(cleanCode)
     .filter((c) => Boolean(c) && c !== pdx);
-  const sdx = [...new Set(rawSdx)];
+  const sdx = [...new Set(rawSdx)].slice(0, 12);
 
-  const rawProc = [row.proc1, row.proc2, row.proc3]
+  const rawProc = [
+    row.proc1,
+    row.proc2,
+    row.proc3,
+    row.proc4,
+    row.proc5,
+    row.proc6,
+    row.proc7,
+    row.proc8,
+    row.proc9,
+    row.proc10,
+    row.proc11,
+    row.proc12,
+  ]
     .map(cleanCode)
     .filter(Boolean);
-  const proc = [...new Set(rawProc)];
+  const proc = [...new Set(rawProc)].slice(0, 30);
 
   const sex: 1 | 2 = /หญิง|2|F/i.test(row.sex || '') ? 2 : 1;
   const losDay =

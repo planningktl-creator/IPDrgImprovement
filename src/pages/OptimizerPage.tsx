@@ -32,23 +32,39 @@ import {
   Activity,
   ChevronDown,
   ChevronUp,
+  ArrowLeft,
 } from 'lucide-react';
 
-export const OptimizerPage: React.FC = () => {
+export interface OptimizerPageProps {
+  initialAn?: string;
+  onBackToWorklist?: () => void;
+  externalSessionId?: string;
+  externalConfig?: BmsConnectionConfig | null;
+  externalStatus?: 'idle' | 'connected' | 'demo' | 'error';
+}
+
+export const OptimizerPage: React.FC<OptimizerPageProps> = ({
+  initialAn,
+  onBackToWorklist,
+  externalSessionId,
+  externalConfig,
+  externalStatus,
+}) => {
   // Session & Connection State
   const [bmsSessionId, setBmsSessionId] = useState<string>(() => {
+    if (externalSessionId) return externalSessionId;
     if (typeof window !== 'undefined') {
       return new URLSearchParams(window.location.search).get('bms-session-id')?.trim() || '';
     }
     return '';
   });
-  const [connectionConfig, setConnectionConfig] = useState<BmsConnectionConfig | null>(null);
-  const [sessionStatus, setSessionStatus] = useState<'idle' | 'connected' | 'demo' | 'error'>('demo');
+  const [connectionConfig, setConnectionConfig] = useState<BmsConnectionConfig | null>(externalConfig ?? null);
+  const [sessionStatus, setSessionStatus] = useState<'idle' | 'connected' | 'demo' | 'error'>(externalStatus ?? 'demo');
   const [hospitalCode, setHospitalCode] = useState<string>(DEFAULT_HCODE);
   const [baseRate, setBaseRate] = useState<number>(8350);
 
   // Search & Case State
-  const [anInput, setAnInput] = useState<string>('1001');
+  const [anInput, setAnInput] = useState<string>(initialAn || '1001');
   const [loading, setLoading] = useState<boolean>(false);
   const [loadingStep, setLoadingStep] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
@@ -175,6 +191,42 @@ export const OptimizerPage: React.FC = () => {
     }
   }, [anInput, connectionConfig, sessionStatus, hospitalCode, baseRate]);
 
+  useEffect(() => {
+    let ignore = false;
+    if (initialAn) {
+      const isDemo = sessionStatus !== 'connected';
+      fetchCaseDetail(initialAn, connectionConfig || undefined, { useDemoFallback: isDemo })
+        .then(async (caseRow) => {
+          if (ignore) return;
+          setCurrentCase(caseRow);
+          const items = await fetchUsageItems(initialAn, connectionConfig || undefined, { useDemoFallback: isDemo });
+          if (ignore) return;
+          setUsageItems(items);
+          const extracted = extractCandidates(items);
+          setCandidates(extracted);
+          const drgInput = cmiCaseToDrgInput(caseRow, { hcode: hospitalCode, baseRate });
+          const result = await suggestHigherDrg(
+            drgInput,
+            extracted.map((c) => ({
+              code: c.code,
+              reason: `พบในหลักฐานการใช้ยา (${c.source})`,
+              evidence: c.evidence,
+            })),
+          );
+          if (ignore) return;
+          setBaseline(result.baseline);
+          setSuggestions(result.suggestions);
+        })
+        .catch((err) => {
+          if (!ignore) setError((err as Error).message);
+        });
+    }
+
+    return () => {
+      ignore = true;
+    };
+  }, [initialAn, connectionConfig, sessionStatus, hospitalCode, baseRate]);
+
   const handleAddManualCandidate = async () => {
     const code = manualCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (!code) return;
@@ -244,6 +296,31 @@ export const OptimizerPage: React.FC = () => {
 
       {/* Main Container */}
       <div style={{ maxWidth: '1280px', margin: '0 auto', padding: '24px 20px' }}>
+        {onBackToWorklist && (
+          <div style={{ marginBottom: '16px' }}>
+            <button
+              type="button"
+              onClick={onBackToWorklist}
+              style={{
+                backgroundColor: '#ffffff',
+                border: '1px solid #cbd5e1',
+                borderRadius: '8px',
+                padding: '8px 14px',
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#2563eb',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+              }}
+            >
+              <ArrowLeft size={16} /> กลับสู่ทะเบียนเคสผู้ป่วยใน (Worklist)
+            </button>
+          </div>
+        )}
+
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
           <div>

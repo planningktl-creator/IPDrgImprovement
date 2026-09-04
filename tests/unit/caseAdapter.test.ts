@@ -127,4 +127,39 @@ describe('cmiCaseToDrgInput', () => {
     const input = cmiCaseToDrgInput(row, { hcode: '10929', dcCodeFallback: '12' });
     expect(input.dcCode).toBe('11'); // default character fallback '1' + '1' = '11'
   });
+
+  it('maps extended secondary diagnoses up to sdx12 and procedures up to proc12', () => {
+    const row: CmiCaseRow = {
+      pdx: 'I210',
+      sdx1: 'I10',
+      sdx2: 'E119',
+      sdx3: 'N183',
+      sdx4: 'E780',
+      sdx5: 'J449',
+      sdx6: 'K290',
+      sdx7: 'Z992',
+      sdx8: 'I252',
+      sdx9: 'I509',
+      sdx10: 'R509',
+      sdx11: 'F329',
+      sdx12: 'H259',
+      proc1: '3606',
+      proc2: '8856',
+      proc3: '9914',
+      proc4: '3893',
+      proc5: '8952',
+      sex: 'ชาย',
+      age: 72,
+      los: 6,
+      dchtype: '1',
+      dchstts: '1',
+    };
+
+    const input = cmiCaseToDrgInput(row, { hcode: '10929' });
+    expect(input.sdx).toHaveLength(12);
+    expect(input.sdx).toContain('H259');
+    expect(input.sdx).toContain('F329');
+    expect(input.proc).toHaveLength(5);
+    expect(input.proc).toContain('8952');
+  });
 });

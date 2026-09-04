@@ -3,8 +3,10 @@ import {
   assertCmiQueryIsReadOnly,
   CASE_DETAIL_SQL,
   USAGE_SQL,
+  CASE_WORKLIST_SQL,
   fetchCaseDetail,
   fetchUsageItems,
+  fetchCaseWorklist,
   retrieveBmsSession,
   extractConnectionConfig,
 } from '@/services/cmiApi';
@@ -13,6 +15,7 @@ describe('cmiApi read-only guards', () => {
   it('allows read-only SELECT and WITH statements', () => {
     expect(() => assertCmiQueryIsReadOnly(CASE_DETAIL_SQL)).not.toThrow();
     expect(() => assertCmiQueryIsReadOnly(USAGE_SQL)).not.toThrow();
+    expect(() => assertCmiQueryIsReadOnly(CASE_WORKLIST_SQL)).not.toThrow();
     expect(() => assertCmiQueryIsReadOnly('SELECT * FROM ipt WHERE an = :an')).not.toThrow();
   });
 
@@ -49,6 +52,17 @@ describe('fetchCaseDetail and fetchUsageItems', () => {
     const items = await fetchUsageItems('1001', undefined, { useDemoFallback: true });
     expect(items.length).toBeGreaterThan(0);
     expect(items.some((i) => i.prescReason?.includes('E11') || i.needOrderReason?.includes('A41'))).toBe(true);
+  });
+
+  it('returns mock worklist cases when in demo/offline mode', async () => {
+    const cases = await fetchCaseWorklist(
+      { dstart: '2023-10-01', dend: '2026-09-30' },
+      undefined,
+      { useDemoFallback: true },
+    );
+    expect(cases.length).toBeGreaterThan(0);
+    expect(cases.some((c) => c.an === '1001')).toBe(true);
+    expect(cases.some((c) => c.remark === 'ยังไม่ลงรหัสโรค')).toBe(true);
   });
 
   it('queries BMS API when connection config is supplied', async () => {
