@@ -155,6 +155,54 @@ describe('fetchCaseDetail and fetchUsageItems', () => {
     expect(detail.pdx).toBe('J189');
     expect(detail.ptname).toBe('นาย ส*** ม***');
   });
+
+  it('queries usage items via BMS API and handles safe nullable need_order_reason', async () => {
+    const mockUsageResponse = {
+      result: [
+        {
+          hos_guid: '{GUID-123}',
+          an: '67000123',
+          icode: '1000001',
+          item_name: 'Ceftriaxone 1g Inj',
+          need_order_reason: null,
+          presc_reason: 'Severe infection A419',
+          presc_reason_2: null,
+          presc_reason_3: null,
+          presc_reason_4: null,
+          presc_reason_5: null,
+          income_name: 'ค่ายา',
+          sum_price: 150,
+          qty: 1,
+          unitprice: 150,
+        },
+      ],
+    };
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => mockUsageResponse,
+    });
+    globalThis.fetch = fetchMock;
+
+    const config = {
+      apiUrl: 'https://bms.test.hospital.org',
+      databaseType: 'postgresql' as const,
+      databaseSupportStatus: 'supported' as const,
+      appIdentifier: 'DRG.Optimizer',
+    };
+
+    const items = await fetchUsageItems('67000123', config);
+    expect(items).toHaveLength(1);
+    expect(items[0].hosGuid).toBe('{GUID-123}');
+    expect(items[0].prescReason).toBe('Severe infection A419');
+    expect(items[0].needOrderReason).toBeNull();
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as { sql: string };
+    expect(requestBody.sql).toContain('CAST(NULL AS text) AS need_order_reason');
+    expect(requestBody.sql).not.toContain('o.need_order_reason');
+    expect(requestBody.sql).toContain('LEFT JOIN ovst_presc_ned n ON o.hos_guid = n.opi_guid');
+  });
 });
 
 describe('retrieveBmsSession', () => {

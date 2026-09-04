@@ -332,6 +332,14 @@ ${ProcSelectDetail}
   FROM iptoprt
   WHERE an IN (SELECT an FROM target_case)
   GROUP BY an
+),
+first_ward_per_an AS (
+  SELECT DISTINCT ON (bm.an)
+    bm.an,
+    bm.oward AS first_ward
+  FROM iptbedmove bm
+  JOIN target_case t ON t.an = bm.an
+  ORDER BY bm.an, bm.movedate ASC NULLS LAST, bm.movetime ASC NULLS LAST
 )
 SELECT
   i.an,
@@ -350,18 +358,14 @@ ${MASKED_PATIENT_FIELDS}
   o.proc22, o.proc23, o.proc24, o.proc25, o.proc26, o.proc27, o.proc28,
   o.proc29, o.proc30,
   i.pttype, pt.name AS pttype_name,
-  fwa.first_ward, fw.name AS first_ward_name,
-  i.ward AS last_ward, lw.name AS last_ward_name
+  COALESCE(fwa.first_ward, i.ward) AS first_ward,
+  fw.name AS first_ward_name,
+  i.ward AS last_ward,
+  lw.name AS last_ward_name
 FROM target_case i
 LEFT JOIN patient p ON i.hn = p.hn
-LEFT JOIN LATERAL (
-  SELECT bm.oward AS first_ward
-  FROM iptbedmove bm
-  WHERE bm.an = i.an
-  ORDER BY bm.movedate ASC NULLS LAST, bm.movetime ASC NULLS LAST, bm.oward ASC NULLS LAST
-  LIMIT 1
-) fwa ON TRUE
-LEFT JOIN ward fw ON fw.ward = fwa.first_ward
+LEFT JOIN first_ward_per_an fwa ON fwa.an = i.an
+LEFT JOIN ward fw ON fw.ward = COALESCE(fwa.first_ward, i.ward)
 LEFT JOIN ward lw ON lw.ward = i.ward
 LEFT JOIN pttype pt ON pt.pttype = i.pttype
 LEFT JOIN pdx_per_an pdx ON i.an = pdx.an
@@ -372,14 +376,15 @@ export const USAGE_SQL = `SELECT
   o.hos_guid, o.an, o.rxdate, o.rxtime, o.icode, o.income AS income_code,
   o.qty, o.unitprice, o.sum_price,
   COALESCE(s.name, d.name, nd.name, o.icode) AS item_name,
-  inc.name AS income_name, o.need_order_reason,
+  inc.name AS income_name,
+  CAST(NULL AS text) AS need_order_reason,
   n.presc_reason, n.presc_reason_2, n.presc_reason_3, n.presc_reason_4, n.presc_reason_5
 FROM opitemrece o
 LEFT JOIN s_drugitems s ON o.icode = s.icode
 LEFT JOIN drugitems d ON o.icode = d.icode
 LEFT JOIN nondrugitems nd ON o.icode = nd.icode
 LEFT JOIN income inc ON o.income = inc.income
-LEFT JOIN ovst_presc_ned n ON o.vn = n.vn AND o.hos_guid = n.opi_guid
+LEFT JOIN ovst_presc_ned n ON o.hos_guid = n.opi_guid
 WHERE o.an = :an
 ORDER BY o.rxdate DESC, o.rxtime DESC, o.hos_guid
 LIMIT :page_limit;`;
@@ -513,7 +518,26 @@ export async function executeSqlViaApi(
     body: JSON.stringify({ sql, app: config.appIdentifier, params }),
     signal: createRequestSignal(signal),
   });
-  if (!res.ok) throw new Error(`BMS SQL execution failed (HTTP ${res.status})`);
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const errJson = await res.json();
+      if (errJson && typeof errJson === 'object') {
+        const msg = (errJson as { Message?: string; message?: string; error?: string }).Message ||
+                    (errJson as { Message?: string; message?: string; error?: string }).message ||
+                    (errJson as { Message?: string; message?: string; error?: string }).error;
+        if (typeof msg === 'string' && msg.trim()) detail = `: ${msg.trim()}`;
+      }
+    } catch {
+      try {
+        const rawText = await res.text();
+        if (rawText && rawText.trim().length < 200) detail = `: ${rawText.trim()}`;
+      } catch {
+        // ignore
+      }
+    }
+    throw new Error(`BMS SQL execution failed (HTTP ${res.status})${detail}`);
+  }
   let payload: unknown;
   try {
     payload = await res.json();
