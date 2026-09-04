@@ -1,4 +1,4 @@
-import { formatDateIso } from '@/utils/dateUtils';
+import { formatDateIso, getFullFiscalYearRange } from '@/utils/dateUtils';
 import {
   calculateEstimatedRevenue,
   getPayerRateConfig,
@@ -16,8 +16,9 @@ import type {
 
 export const PASTE_JSON_URL = 'https://hosxp.net/phapi/PasteJSON';
 export const APP_IDENTIFIER = 'DRG.Optimizer.React';
-export const DEFAULT_WORKLIST_START = '2023-10-01';
-export const DEFAULT_WORKLIST_END = '2026-09-30';
+const defaultFiscalRange = getFullFiscalYearRange();
+export const DEFAULT_WORKLIST_START = defaultFiscalRange.dstart;
+export const DEFAULT_WORKLIST_END = defaultFiscalRange.dend;
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 100;
 export const MAX_EXPORT_ROWS = 10_000;

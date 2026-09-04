@@ -4,7 +4,7 @@ import { THAI_FISCAL_MONTHS, getFiscalMonthRange, getFiscalYearRange, getRecentF
 import { auditClinicalCase } from '@/audit/clinicalAuditEngine';
 import { getPayerRateConfig } from '@/config/reimbursementRates';
 import { downloadCasesCsv, downloadCasesXlsx } from '@/utils/exportUtils';
-import { fetchCasePage, exportCaseWorklist, isBmsSessionFailure, DEFAULT_WORKLIST_END, DEFAULT_WORKLIST_START, DEFAULT_PAGE_SIZE, type BmsConnectionConfig } from '@/services/cmiApi';
+import { fetchCasePage, exportCaseWorklist, isBmsSessionFailure, DEFAULT_PAGE_SIZE, type BmsConnectionConfig } from '@/services/cmiApi';
 import type { CasePageResult, CmiCaseRow, PayerScheme, WorklistQueryParams } from '@/cmi/caseContract';
 import type { SessionStatus } from '@/session/useBmsSession';
 
@@ -144,10 +144,11 @@ function CaseTable({ rows, onOpen }: { rows: CmiCaseRow[]; onOpen: (an: string) 
 
 export function WorklistPage({ onSelectCaseForOptimization, connectionConfig, sessionStatus, onConnectSession, onSessionError }: WorklistPageProps) {
   const currentFiscalYear = useMemo(() => getThaiFiscalYear(), []);
-  const [selectedFiscalYear, setSelectedFiscalYear] = useState<number | 'query_all'>('query_all');
+  const initialFiscalRange = useMemo(() => getFiscalYearRange(currentFiscalYear, true), [currentFiscalYear]);
+  const [selectedFiscalYear, setSelectedFiscalYear] = useState<number | 'query_all'>(currentFiscalYear);
   const [selectedFiscalMonth, setSelectedFiscalMonth] = useState<number | 'all'>('all');
-  const [dstart, setDstart] = useState(DEFAULT_WORKLIST_START);
-  const [dend, setDend] = useState(DEFAULT_WORKLIST_END);
+  const [dstart, setDstart] = useState(initialFiscalRange.dstart);
+  const [dend, setDend] = useState(initialFiscalRange.dend);
   const [ward, setWard] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'uncoded' | 'coded'>('all');
   const [scheme, setScheme] = useState<PayerScheme | 'all'>('all');
@@ -185,22 +186,41 @@ export function WorklistPage({ onSelectCaseForOptimization, connectionConfig, se
 
   const resetPaging = () => setCursorStack((stack) => stack.length === 0 ? stack : []);
   const handleFiscalYear = (value: string) => {
-    if (value === 'query_all') { setSelectedFiscalYear('query_all'); setSelectedFiscalMonth('all'); setDstart(DEFAULT_WORKLIST_START); setDend(DEFAULT_WORKLIST_END); resetPaging(); return; }
+    if (value === 'query_all') {
+      setSelectedFiscalYear('query_all');
+      setSelectedFiscalMonth('all');
+      const oldestRange = getFiscalYearRange(currentFiscalYear - 5, true);
+      const currentRange = getFiscalYearRange(currentFiscalYear, true);
+      setDstart(oldestRange.dstart);
+      setDend(currentRange.dend);
+      resetPaging();
+      return;
+    }
     const year = Number(value);
-    setSelectedFiscalYear(year); setSelectedFiscalMonth('all');
-    const range = getFiscalYearRange(year, false);
-    setDstart(range.dstart); setDend(range.dend); resetPaging();
+    setSelectedFiscalYear(year);
+    setSelectedFiscalMonth('all');
+    const range = getFiscalYearRange(year, true);
+    setDstart(range.dstart);
+    setDend(range.dend);
+    resetPaging();
   };
   const handleFiscalMonth = (value: string) => {
     if (value === 'all') {
       setSelectedFiscalMonth('all');
-      const range = selectedFiscalYear === 'query_all' ? { dstart: DEFAULT_WORKLIST_START, dend: DEFAULT_WORKLIST_END } : getFiscalYearRange(selectedFiscalYear, false);
-      setDstart(range.dstart); setDend(range.dend); resetPaging(); return;
+      const targetYear = selectedFiscalYear === 'query_all' ? currentFiscalYear : selectedFiscalYear;
+      const range = getFiscalYearRange(targetYear, true);
+      setDstart(range.dstart);
+      setDend(range.dend);
+      resetPaging();
+      return;
     }
     const month = Number(value);
     setSelectedFiscalMonth(month);
-    const range = getFiscalMonthRange(selectedFiscalYear === 'query_all' ? currentFiscalYear : selectedFiscalYear, month);
-    setDstart(range.dstart); setDend(range.dend); resetPaging();
+    const targetYear = selectedFiscalYear === 'query_all' ? currentFiscalYear : selectedFiscalYear;
+    const range = getFiscalMonthRange(targetYear, month);
+    setDstart(range.dstart);
+    setDend(range.dend);
+    resetPaging();
   };
   const handleExport = async (format: 'csv' | 'xlsx') => {
     if (sessionStatus !== 'connected' || !connectionConfig) {
@@ -236,13 +256,13 @@ export function WorklistPage({ onSelectCaseForOptimization, connectionConfig, se
     <section className="filter-panel" aria-label="ตัวกรองทะเบียนเคส">
       <div className="filter-panel-head"><div><span className="eyebrow"><Filter size={13} /> QUERY CONTROL</span><h3>ช่วงข้อมูลและตัวกรอง</h3></div><span className="query-range"><CalendarDays size={14} />{rangeLabel}</span></div>
       <div className="filter-grid">
-        <label className="field"><span>ปีงบประมาณ</span><select value={selectedFiscalYear} onChange={(event) => handleFiscalYear(event.target.value)}><option value="query_all">ทั้งหมด · Query range</option>{fiscalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
+        <label className="field"><span>ปีงบประมาณ</span><select value={selectedFiscalYear} onChange={(event) => handleFiscalYear(event.target.value)}><option value="query_all">ทั้งหมด · กำหนดเอง</option>{fiscalYears.map((year) => <option key={year} value={year}>{year === currentFiscalYear ? `${year} · ปีปัจจุบัน` : year}</option>)}</select></label>
         <label className="field"><span>เดือนในรอบปีงบฯ</span><select value={selectedFiscalMonth} onChange={(event) => handleFiscalMonth(event.target.value)}><option value="all">ทั้งปีงบประมาณ</option>{THAI_FISCAL_MONTHS.map((month) => <option key={month.fiscalMonth} value={month.fiscalMonth}>{month.name} · {month.fullName}</option>)}</select></label>
         <label className="field"><span>หอผู้ป่วย</span><input value={ward} onChange={(event) => { setWard(event.target.value); resetPaging(); }} placeholder="ทุกหอผู้ป่วย หรือระบุรหัส" list="ward-suggestions" /><datalist id="ward-suggestions">{state.data.items.flatMap((item) => [item.firstWard && `${item.firstWard} · ${item.firstWardName ?? ''}`, item.lastWard && `${item.lastWard} · ${item.lastWardName ?? ''}`]).filter(Boolean).map((item, index) => <option key={`${item}-${index}`} value={String(item).split(' · ')[0]}>{item}</option>)}</datalist></label>
         <label className="field"><span>สถานะการลงรหัส</span><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as typeof statusFilter); resetPaging(); }}><option value="all">ทุกสถานะ</option><option value="uncoded">ยังไม่ลงรหัส</option><option value="coded">ลงรหัสแล้ว</option></select></label>
         <label className="field"><span>สิทธิ์การรักษา</span><select value={scheme} onChange={(event) => { setScheme(event.target.value as PayerScheme | 'all'); resetPaging(); }}><option value="all">ทุกสิทธิ์</option><option value="ucs">UCS · บัตรทอง</option><option value="ofc">OFC · ข้าราชการ</option><option value="sss">SSS · ประกันสังคม</option><option value="other">อื่น ๆ / ไม่ระบุ</option></select></label>
       </div>
-      <div className="filter-foot"><label className="search-field"><Search size={17} /><input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="ค้นหา AN, HN ที่ mask แล้ว, ชื่อที่ mask แล้ว, PDx หรือหอผู้ป่วย" aria-label="ค้นหาเคส" /><span className="search-hint">ค้นหาแบบ server-side</span></label><button className="button button-quiet" type="button" onClick={() => { setSearchInput(''); setDebouncedSearch(''); setWard(''); setStatusFilter('all'); setScheme('all'); resetPaging(); }}><X size={15} />ล้างตัวกรอง</button></div>
+      <div className="filter-foot"><label className="search-field"><Search size={17} /><input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="ค้นหา AN, HN ที่ mask แล้ว, ชื่อที่ mask แล้ว, PDx หรือหอผู้ป่วย" aria-label="ค้นหาเคส" /><span className="search-hint">ค้นหาแบบ server-side</span></label><button className="button button-quiet" type="button" onClick={() => { setSearchInput(''); setDebouncedSearch(''); setWard(''); setStatusFilter('all'); setScheme('all'); setSelectedFiscalYear(currentFiscalYear); setSelectedFiscalMonth('all'); setDstart(initialFiscalRange.dstart); setDend(initialFiscalRange.dend); resetPaging(); }}><X size={15} />ล้างตัวกรอง</button></div>
       {selectedFiscalYear === 'query_all' && <div className="date-editor"><label className="field"><span>ตั้งแต่วันที่</span><input type="date" value={dstart} onChange={(event) => { setDstart(event.target.value); resetPaging(); }} /></label><span className="date-arrow">ถึง</span><label className="field"><span>ถึงวันที่</span><input type="date" value={dend} onChange={(event) => { setDend(event.target.value); resetPaging(); }} /></label></div>}
     </section>
 

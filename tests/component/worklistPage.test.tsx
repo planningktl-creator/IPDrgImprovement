@@ -85,7 +85,7 @@ describe('WorklistPage Component', () => {
     expect(screen.queryByText('1002')).not.toBeInTheDocument();
   });
 
-  it('renders dropdown filter bars for Year, Month, Ward, Status, and Scheme', () => {
+  it('renders dropdown filter bars for Year, Month, Ward, Status, and Scheme and defaults to dynamic current fiscal year', () => {
     render(
       <WorklistPage
         onSelectCaseForOptimization={vi.fn()}
@@ -101,6 +101,11 @@ describe('WorklistPage Component', () => {
     expect(screen.getByText(/เดือนในรอบปีงบฯ/i)).toBeInTheDocument();
     expect(screen.getByText(/สถานะการลงรหัส/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/หอผู้ป่วย/i)).toBeInTheDocument();
+
+    // Verify dynamic current fiscal year is selected by default
+    const yearSelect = selects[0] as HTMLSelectElement;
+    const currentFy = new Date().getMonth() + 1 >= 10 ? new Date().getFullYear() + 544 : new Date().getFullYear() + 543;
+    expect(yearSelect.value).toBe(String(currentFy));
   });
 
   it('fetches real cases, displays KPIs, clinical audit badges, and handles filtering', async () => {
