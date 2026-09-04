@@ -102,16 +102,94 @@ export function getLastDaysRange(days: number, refDate: Date = new Date()): Date
  * Get dynamic range for previous Thai fiscal year (full 12 months: Oct 1 - Sep 30).
  */
 export function getPreviousFiscalYearRange(refDate: Date = new Date()): DateRangeResult {
-  const currentFyRange = getCurrentFiscalYearRange(refDate);
-  const currentStartYear = Number(currentFyRange.dstart.slice(0, 4));
-  const prevStartYear = currentStartYear - 1;
-  const dstart = `${prevStartYear}-10-01`;
-  const dend = `${currentStartYear}-09-30`;
-  const fyBe = getThaiFiscalYear(refDate) - 1;
+  const currentFy = getThaiFiscalYear(refDate);
+  return getFiscalYearRange(currentFy - 1, true, refDate);
+}
+
+export interface FiscalMonthInfo {
+  fiscalMonth: number; // 1 to 12
+  calendarMonth: number; // 1 to 12 (10=Oct, 11=Nov, 12=Dec, 1=Jan, ..., 9=Sep)
+  name: string; // 'ต.ค.', 'พ.ย.', etc.
+  fullName: string;
+  quarter: number; // 1 to 4
+}
+
+export const THAI_FISCAL_MONTHS: FiscalMonthInfo[] = [
+  { fiscalMonth: 1, calendarMonth: 10, name: 'ต.ค.', fullName: 'ตุลาคม', quarter: 1 },
+  { fiscalMonth: 2, calendarMonth: 11, name: 'พ.ย.', fullName: 'พฤศจิกายน', quarter: 1 },
+  { fiscalMonth: 3, calendarMonth: 12, name: 'ธ.ค.', fullName: 'ธันวาคม', quarter: 1 },
+  { fiscalMonth: 4, calendarMonth: 1, name: 'ม.ค.', fullName: 'มกราคม', quarter: 2 },
+  { fiscalMonth: 5, calendarMonth: 2, name: 'ก.พ.', fullName: 'กุมภาพันธ์', quarter: 2 },
+  { fiscalMonth: 6, calendarMonth: 3, name: 'มี.ค.', fullName: 'มีนาคม', quarter: 2 },
+  { fiscalMonth: 7, calendarMonth: 4, name: 'เม.ย.', fullName: 'เมษายน', quarter: 3 },
+  { fiscalMonth: 8, calendarMonth: 5, name: 'พ.ค.', fullName: 'พฤษภาคม', quarter: 3 },
+  { fiscalMonth: 9, calendarMonth: 6, name: 'มิ.ย.', fullName: 'มิถุนายน', quarter: 3 },
+  { fiscalMonth: 10, calendarMonth: 7, name: 'ก.ค.', fullName: 'กรกฎาคม', quarter: 4 },
+  { fiscalMonth: 11, calendarMonth: 8, name: 'ส.ค.', fullName: 'สิงหาคม', quarter: 4 },
+  { fiscalMonth: 12, calendarMonth: 9, name: 'ก.ย.', fullName: 'กันยายน', quarter: 4 },
+];
+
+/**
+ * Get date range for a specific Thai Fiscal Year (e.g. 2568, 2569).
+ */
+export function getFiscalYearRange(
+  yearBe: number,
+  fullYear: boolean = true,
+  refDate: Date = new Date(),
+): DateRangeResult {
+  const startCe = yearBe - 544;
+  const endCe = yearBe - 543;
+  const dstart = `${startCe}-10-01`;
+
+  const isCurrentFy = yearBe === getThaiFiscalYear(refDate);
+  if (!fullYear && isCurrentFy) {
+    return {
+      dstart,
+      dend: formatDateIso(refDate),
+      label: `ปีงบประมาณ ${yearBe} (ถึงปัจจุบัน)`,
+    };
+  }
+
+  return {
+    dstart,
+    dend: `${endCe}-09-30`,
+    label: `ปีงบประมาณ ${yearBe} (เต็มปี)`,
+  };
+}
+
+/**
+ * Get list of recent Thai fiscal years for selection dropdowns.
+ */
+export function getRecentFiscalYears(count: number = 5, refDate: Date = new Date()): number[] {
+  const currentFy = getThaiFiscalYear(refDate);
+  const years: number[] = [];
+  for (let i = 0; i < count; i++) {
+    years.push(currentFy - i);
+  }
+  return years;
+}
+
+/**
+ * Get date range for a specific month in a Thai fiscal year (fiscalMonth 1 = Oct ... 12 = Sep).
+ */
+export function getFiscalMonthRange(yearBe: number, fiscalMonth: number): DateRangeResult {
+  const mInfo = THAI_FISCAL_MONTHS.find((m) => m.fiscalMonth === fiscalMonth);
+  if (!mInfo) {
+    throw new Error(`Invalid fiscal month: ${fiscalMonth}. Must be 1 to 12.`);
+  }
+
+  const isLastQuarterOfPrevYear = mInfo.calendarMonth >= 10;
+  const yearCe = isLastQuarterOfPrevYear ? yearBe - 544 : yearBe - 543;
+  const monthStr = String(mInfo.calendarMonth).padStart(2, '0');
+  const dstart = `${yearCe}-${monthStr}-01`;
+
+  // Calculate last day of month
+  const lastDay = new Date(yearCe, mInfo.calendarMonth, 0).getDate();
+  const dend = `${yearCe}-${monthStr}-${String(lastDay).padStart(2, '0')}`;
 
   return {
     dstart,
     dend,
-    label: `ปีงบประมาณ ${fyBe}`,
+    label: `${mInfo.fullName} ${yearBe}`,
   };
 }

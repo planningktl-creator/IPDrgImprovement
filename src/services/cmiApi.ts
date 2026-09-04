@@ -649,6 +649,68 @@ export const DEMO_WORKLIST_CASES: CmiCaseRow[] = [
     remainMoney: 0,
     remark: '-',
   },
+  {
+    an: '1007',
+    hn: '0011223',
+    ptname: 'นาย วิ*** ส***',
+    sex: 'ชาย',
+    age: 59,
+    firstWard: '01',
+    firstWardName: 'หอผู้ป่วยอายุรกรรมชาย',
+    lastWard: '01',
+    lastWardName: 'หอผู้ป่วยอายุรกรรมชาย',
+    admdate: getRelativeDate(370),
+    dchdate: getRelativeDate(365),
+    los: 5,
+    dchtype: '1',
+    dchstts: '1',
+    drg: '01010',
+    mdc: '01',
+    rw: 1.25,
+    adjrw: 1.34,
+    pdx: 'G409',
+    sdx1: 'I10',
+    sdx2: null,
+    sdx3: null,
+    sdx4: null,
+    proc1: null,
+    proc2: null,
+    proc3: null,
+    income: 14200,
+    remainMoney: 0,
+    remark: '-',
+  },
+  {
+    an: '1008',
+    hn: '0022334',
+    ptname: 'นาง บัว*** ก***',
+    sex: 'หญิง',
+    age: 64,
+    firstWard: '02',
+    firstWardName: 'หอผู้ป่วยอายุรกรรมหญิง',
+    lastWard: '02',
+    lastWardName: 'หอผู้ป่วยอายุรกรรมหญิง',
+    admdate: getRelativeDate(380),
+    dchdate: getRelativeDate(375),
+    los: 5,
+    dchtype: '1',
+    dchstts: '1',
+    drg: null,
+    mdc: null,
+    rw: null,
+    adjrw: 0,
+    pdx: null,
+    sdx1: null,
+    sdx2: null,
+    sdx3: null,
+    sdx4: null,
+    proc1: null,
+    proc2: null,
+    proc3: null,
+    income: 9800,
+    remainMoney: 0,
+    remark: 'ยังไม่ลงรหัสโรค',
+  },
 ];
 
 export async function fetchCaseDetail(
@@ -712,6 +774,12 @@ export async function fetchCaseWorklist(
         (c.pdx && c.pdx.toLowerCase().includes(q)) ||
         (c.firstWardName && c.firstWardName.toLowerCase().includes(q)),
       );
+    }
+    if (params.dstart) {
+      list = list.filter((c) => !c.dchdate || c.dchdate >= params.dstart);
+    }
+    if (params.dend) {
+      list = list.filter((c) => !c.dchdate || c.dchdate <= params.dend);
     }
     return list;
   }

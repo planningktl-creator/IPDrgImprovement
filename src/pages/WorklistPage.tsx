@@ -13,6 +13,11 @@ import {
   Calendar,
 } from 'lucide-react';
 import {
+  getThaiFiscalYear,
+  getRecentFiscalYears,
+  getFiscalYearRange,
+  getFiscalMonthRange,
+  THAI_FISCAL_MONTHS,
   getCurrentFiscalYearRange,
   getFullFiscalYearRange,
   getCurrentMonthRange,
@@ -31,6 +36,14 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
   connectionConfig,
   sessionStatus,
 }) => {
+  // Fiscal Year state management
+  const currentFiscalYear = useMemo(() => getThaiFiscalYear(), []);
+  const availableFiscalYears = useMemo(() => getRecentFiscalYears(5), []);
+
+  const [selectedFiscalYear, setSelectedFiscalYear] = useState<number>(currentFiscalYear);
+  const [selectedFiscalMonth, setSelectedFiscalMonth] = useState<number | 'all'>('all');
+  const [isCurrentYearToDate, setIsCurrentYearToDate] = useState<boolean>(true);
+
   // Dynamic Thai Fiscal Year default range (no hardcoded dates)
   const initialDateRange = useMemo(() => getCurrentFiscalYearRange(), []);
   const [dstart, setDstart] = useState<string>(initialDateRange.dstart);
@@ -38,6 +51,36 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
   const [statusFilter, setStatusFilter] = useState<'all' | 'uncoded' | 'coded'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedWard, setSelectedWard] = useState<string>('all');
+
+  const handleSelectFiscalYear = (year: number) => {
+    setSelectedFiscalYear(year);
+    setSelectedFiscalMonth('all');
+    const range = getFiscalYearRange(year, year !== currentFiscalYear || !isCurrentYearToDate);
+    setDstart(range.dstart);
+    setDend(range.dend);
+  };
+
+  const handleSelectFiscalMonth = (month: number | 'all') => {
+    setSelectedFiscalMonth(month);
+    if (month === 'all') {
+      const range = getFiscalYearRange(selectedFiscalYear, selectedFiscalYear !== currentFiscalYear || !isCurrentYearToDate);
+      setDstart(range.dstart);
+      setDend(range.dend);
+    } else {
+      const range = getFiscalMonthRange(selectedFiscalYear, month);
+      setDstart(range.dstart);
+      setDend(range.dend);
+    }
+  };
+
+  const handleToggleCurrentYearScope = (toDate: boolean) => {
+    setIsCurrentYearToDate(toDate);
+    if (selectedFiscalMonth === 'all') {
+      const range = getFiscalYearRange(selectedFiscalYear, !toDate);
+      setDstart(range.dstart);
+      setDend(range.dend);
+    }
+  };
 
   const [cases, setCases] = useState<CmiCaseRow[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
@@ -182,6 +225,166 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
             <RefreshCw size={15} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
             {loading ? 'กำลังโหลด...' : 'รีเฟรชข้อมูล'}
           </button>
+        </div>
+      </div>
+
+      {/* Fiscal Year Selection Panel */}
+      <div style={{
+        backgroundColor: '#ffffff',
+        borderRadius: '12px',
+        padding: '16px 20px',
+        border: '1px solid #e2e8f0',
+        marginBottom: '20px',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+          {/* Fiscal Year Buttons */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '13px', fontWeight: '700', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <Calendar size={16} color="#2563eb" /> แสดงข้อมูลปีงบประมาณ:
+            </span>
+            {availableFiscalYears.map((year) => {
+              const isSelected = selectedFiscalYear === year;
+              const isCurrent = year === currentFiscalYear;
+              return (
+                <button
+                  key={year}
+                  type="button"
+                  onClick={() => handleSelectFiscalYear(year)}
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: '8px',
+                    fontSize: '13px',
+                    fontWeight: isSelected ? '700' : '500',
+                    border: isSelected ? '2px solid #2563eb' : '1px solid #cbd5e1',
+                    backgroundColor: isSelected ? '#eff6ff' : '#ffffff',
+                    color: isSelected ? '#1d4ed8' : '#334155',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    boxShadow: isSelected ? '0 1px 2px rgba(37,99,235,0.1)' : 'none',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  <span>ปีงบประมาณ {year}</span>
+                  {isCurrent && (
+                    <span style={{
+                      fontSize: '10px',
+                      backgroundColor: isSelected ? '#2563eb' : '#e2e8f0',
+                      color: isSelected ? '#ffffff' : '#475569',
+                      padding: '1px 5px',
+                      borderRadius: '4px',
+                      fontWeight: '600',
+                    }}>
+                      ปัจจุบัน
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Current Year Scope Toggle (when current FY and all months) */}
+          {selectedFiscalYear === currentFiscalYear && selectedFiscalMonth === 'all' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', backgroundColor: '#f1f5f9', padding: '3px', borderRadius: '6px' }}>
+              <button
+                type="button"
+                onClick={() => handleToggleCurrentYearScope(true)}
+                style={{
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  border: 'none',
+                  backgroundColor: isCurrentYearToDate ? '#ffffff' : 'transparent',
+                  color: isCurrentYearToDate ? '#1d4ed8' : '#64748b',
+                  cursor: 'pointer',
+                  fontWeight: isCurrentYearToDate ? '700' : '500',
+                  boxShadow: isCurrentYearToDate ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                }}
+              >
+                ถึงปัจจุบัน
+              </button>
+              <button
+                type="button"
+                onClick={() => handleToggleCurrentYearScope(false)}
+                style={{
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  border: 'none',
+                  backgroundColor: !isCurrentYearToDate ? '#ffffff' : 'transparent',
+                  color: !isCurrentYearToDate ? '#1d4ed8' : '#64748b',
+                  cursor: 'pointer',
+                  fontWeight: !isCurrentYearToDate ? '700' : '500',
+                  boxShadow: !isCurrentYearToDate ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                }}
+              >
+                เต็มปีงบประมาณ
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Fiscal Month Selection Sub-bar */}
+        <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #f1f5f9' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '600', marginRight: '4px' }}>
+              เดือนในรอบปีงบ {selectedFiscalYear}:
+            </span>
+            <button
+              type="button"
+              onClick={() => handleSelectFiscalMonth('all')}
+              style={{
+                padding: '4px 10px',
+                borderRadius: '6px',
+                fontSize: '12px',
+                fontWeight: selectedFiscalMonth === 'all' ? '700' : '500',
+                border: 'none',
+                cursor: 'pointer',
+                backgroundColor: selectedFiscalMonth === 'all' ? '#1e293b' : '#f1f5f9',
+                color: selectedFiscalMonth === 'all' ? '#ffffff' : '#475569',
+              }}
+            >
+              ทั้งหมด (12 เดือน)
+            </button>
+
+            {THAI_FISCAL_MONTHS.map((m) => {
+              const isMonthSelected = selectedFiscalMonth === m.fiscalMonth;
+              return (
+                <button
+                  key={m.fiscalMonth}
+                  type="button"
+                  onClick={() => handleSelectFiscalMonth(m.fiscalMonth)}
+                  style={{
+                    padding: '4px 8px',
+                    borderRadius: '6px',
+                    fontSize: '12px',
+                    fontWeight: isMonthSelected ? '700' : '500',
+                    border: 'none',
+                    cursor: 'pointer',
+                    backgroundColor: isMonthSelected ? '#2563eb' : '#f8fafc',
+                    color: isMonthSelected ? '#ffffff' : '#475569',
+                  }}
+                >
+                  {m.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Active Scope Summary Banner */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+        <div style={{ fontSize: '14px', fontWeight: '700', color: '#1e293b' }}>
+          สรุปสถิติ: <span style={{ color: '#2563eb' }}>ปีงบประมาณ {selectedFiscalYear}</span>
+          {selectedFiscalMonth !== 'all' && (
+            <span style={{ color: '#059669', marginLeft: '6px' }}>
+              (เดือน{THAI_FISCAL_MONTHS.find((m) => m.fiscalMonth === selectedFiscalMonth)?.fullName})
+            </span>
+          )}
+        </div>
+        <div style={{ fontSize: '12px', color: '#64748b' }}>
+          ช่วงวันจำหน่าย: <strong>{dstart}</strong> ถึง <strong>{dend}</strong>
         </div>
       </div>
 

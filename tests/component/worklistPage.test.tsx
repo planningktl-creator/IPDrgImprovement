@@ -70,4 +70,44 @@ describe('WorklistPage Component', () => {
       expect(screen.getByText(/ช่วงวันที่ค้นหา:/i)).toBeInTheDocument();
     });
   });
+
+  it('allows switching and viewing data by fiscal year and fiscal month', async () => {
+    const onSelectMock = vi.fn();
+    render(
+      <WorklistPage
+        onSelectCaseForOptimization={onSelectMock}
+        connectionConfig={null}
+        sessionStatus="demo"
+      />,
+    );
+
+    // Verify initial cases render first
+    await waitFor(() => {
+      expect(screen.getByText('1001')).toBeInTheDocument();
+    });
+
+    // Verify Fiscal Year buttons exist
+    const fyButtons = screen.getAllByRole('button', { name: /ปีงบประมาณ/i });
+    expect(fyButtons.length).toBeGreaterThanOrEqual(2);
+
+    // Click previous fiscal year button (e.g., 2568)
+    const prevFyBtn = fyButtons.find((btn) => btn.textContent?.includes('2568'));
+    if (prevFyBtn) {
+      fireEvent.click(prevFyBtn);
+      await waitFor(() => {
+        expect(screen.getByText('1007')).toBeInTheDocument();
+        expect(screen.getByText('1008')).toBeInTheDocument();
+        expect(screen.getAllByText(/ปีงบประมาณ 2568/i).length).toBeGreaterThanOrEqual(1);
+      });
+    }
+
+    // Click a fiscal month button (e.g. "ต.ค.")
+    const octBtn = screen.getByRole('button', { name: 'ต.ค.' });
+    expect(octBtn).toBeInTheDocument();
+    fireEvent.click(octBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/เดือนตุลาคม/i)).toBeInTheDocument();
+    });
+  });
 });
