@@ -1,4 +1,5 @@
 import type { CmiCaseRow, UsageLite, WorklistQueryParams } from '@/cmi/caseContract';
+import { formatDateIso } from '@/utils/dateUtils';
 
 export const PASTE_JSON_URL = 'https://hosxp.net/phapi/PasteJSON';
 export const APP_IDENTIFIER = 'DRG.Optimizer.React';
@@ -454,6 +455,12 @@ export const DEMO_USAGE_ITEMS: UsageLite[] = [
   },
 ];
 
+function getRelativeDate(daysAgoCount: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgoCount);
+  return formatDateIso(d);
+}
+
 export const DEMO_WORKLIST_CASES: CmiCaseRow[] = [
   {
     an: '1001',
@@ -465,8 +472,8 @@ export const DEMO_WORKLIST_CASES: CmiCaseRow[] = [
     firstWardName: 'หอผู้ป่วยอายุรกรรมชาย',
     lastWard: '01',
     lastWardName: 'หอผู้ป่วยอายุรกรรมชาย',
-    admdate: '2026-08-28',
-    dchdate: '2026-09-03',
+    admdate: getRelativeDate(7),
+    dchdate: getRelativeDate(1),
     los: 6,
     dchtype: '1',
     dchstts: '1',
@@ -496,8 +503,8 @@ export const DEMO_WORKLIST_CASES: CmiCaseRow[] = [
     firstWardName: 'หอผู้ป่วยอายุรกรรมหญิง',
     lastWard: '02',
     lastWardName: 'หอผู้ป่วยอายุรกรรมหญิง',
-    admdate: '2026-08-30',
-    dchdate: '2026-09-02',
+    admdate: getRelativeDate(5),
+    dchdate: getRelativeDate(2),
     los: 3,
     dchtype: '1',
     dchstts: '1',
@@ -527,8 +534,8 @@ export const DEMO_WORKLIST_CASES: CmiCaseRow[] = [
     firstWardName: 'หอผู้ป่วยศัลยกรรม',
     lastWard: '03',
     lastWardName: 'หอผู้ป่วยศัลยกรรม',
-    admdate: '2026-08-25',
-    dchdate: '2026-09-01',
+    admdate: getRelativeDate(10),
+    dchdate: getRelativeDate(3),
     los: 7,
     dchtype: '1',
     dchstts: '1',
@@ -558,8 +565,8 @@ export const DEMO_WORKLIST_CASES: CmiCaseRow[] = [
     firstWardName: 'หอผู้ป่วยกุมารเวชกรรม',
     lastWard: '05',
     lastWardName: 'หอผู้ป่วยกุมารเวชกรรม',
-    admdate: '2026-09-01',
-    dchdate: '2026-09-03',
+    admdate: getRelativeDate(3),
+    dchdate: getRelativeDate(1),
     los: 2,
     dchtype: '1',
     dchstts: '1',
@@ -589,8 +596,8 @@ export const DEMO_WORKLIST_CASES: CmiCaseRow[] = [
     firstWardName: 'หอผู้ป่วยสูติ-นรีเวชกรรม',
     lastWard: '04',
     lastWardName: 'หอผู้ป่วยสูติ-นรีเวชกรรม',
-    admdate: '2026-08-31',
-    dchdate: '2026-09-02',
+    admdate: getRelativeDate(4),
+    dchdate: getRelativeDate(2),
     los: 2,
     dchtype: '1',
     dchstts: '1',
@@ -620,8 +627,8 @@ export const DEMO_WORKLIST_CASES: CmiCaseRow[] = [
     firstWardName: 'หอผู้ป่วยอายุรกรรมชาย',
     lastWard: '01',
     lastWardName: 'หอผู้ป่วยอายุรกรรมชาย',
-    admdate: '2026-08-26',
-    dchdate: '2026-09-01',
+    admdate: getRelativeDate(9),
+    dchdate: getRelativeDate(3),
     los: 6,
     dchtype: '1',
     dchstts: '1',

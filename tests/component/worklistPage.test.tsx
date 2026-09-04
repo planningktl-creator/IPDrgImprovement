@@ -40,4 +40,34 @@ describe('WorklistPage Component', () => {
     fireEvent.click(optimizeButtons[0]);
     expect(onSelectMock).toHaveBeenCalledWith('1002');
   });
+
+  it('supports quick date preset buttons to change date range dynamically', async () => {
+    const onSelectMock = vi.fn();
+    render(
+      <WorklistPage
+        onSelectCaseForOptimization={onSelectMock}
+        connectionConfig={null}
+        sessionStatus="demo"
+      />,
+    );
+
+    // Verify quick preset buttons exist
+    const thisMonthBtn = screen.getByRole('button', { name: /เดือนนี้/i });
+    const last30DaysBtn = screen.getByRole('button', { name: /30 วันล่าสุด/i });
+    expect(thisMonthBtn).toBeInTheDocument();
+    expect(last30DaysBtn).toBeInTheDocument();
+
+    // Click "เดือนนี้" and verify date range text updates
+    fireEvent.click(thisMonthBtn);
+    await waitFor(() => {
+      expect(screen.getByText(/ช่วงวันที่ค้นหา:/i)).toBeInTheDocument();
+      expect(screen.getByText('1001')).toBeInTheDocument();
+    });
+
+    // Click "30 วันล่าสุด"
+    fireEvent.click(last30DaysBtn);
+    await waitFor(() => {
+      expect(screen.getByText(/ช่วงวันที่ค้นหา:/i)).toBeInTheDocument();
+    });
+  });
 });

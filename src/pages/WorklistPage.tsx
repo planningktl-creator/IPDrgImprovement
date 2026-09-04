@@ -10,7 +10,15 @@ import {
   Clock,
   User,
   Activity,
+  Calendar,
 } from 'lucide-react';
+import {
+  getCurrentFiscalYearRange,
+  getFullFiscalYearRange,
+  getCurrentMonthRange,
+  getLastDaysRange,
+  getPreviousFiscalYearRange,
+} from '@/utils/dateUtils';
 
 export interface WorklistPageProps {
   onSelectCaseForOptimization: (an: string) => void;
@@ -23,9 +31,10 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
   connectionConfig,
   sessionStatus,
 }) => {
-  // Query parameters according to the user's canonical SQL
-  const [dstart, setDstart] = useState<string>('2023-10-01');
-  const [dend, setDend] = useState<string>('2026-09-30');
+  // Dynamic Thai Fiscal Year default range (no hardcoded dates)
+  const initialDateRange = useMemo(() => getCurrentFiscalYearRange(), []);
+  const [dstart, setDstart] = useState<string>(initialDateRange.dstart);
+  const [dend, setDend] = useState<string>(initialDateRange.dend);
   const [statusFilter, setStatusFilter] = useState<'all' | 'uncoded' | 'coded'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedWard, setSelectedWard] = useState<string>('all');
@@ -217,6 +226,113 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
 
       {/* Filter Toolbar */}
       <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', padding: '18px', border: '1px solid #e2e8f0', marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+        {/* Quick Date Presets Bar */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '12px', fontWeight: '600', color: '#475569', display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <Calendar size={14} color="#2563eb" /> ช่วงเวลาด่วน:
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              const r = getCurrentFiscalYearRange();
+              setDstart(r.dstart);
+              setDend(r.dend);
+            }}
+            style={{
+              backgroundColor: '#f8fafc',
+              border: '1px solid #cbd5e1',
+              borderRadius: '6px',
+              padding: '4px 10px',
+              fontSize: '12px',
+              color: '#334155',
+              cursor: 'pointer',
+              fontWeight: '500',
+            }}
+          >
+            ปีงบประมาณนี้ (ถึงวันนี้)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const r = getCurrentMonthRange();
+              setDstart(r.dstart);
+              setDend(r.dend);
+            }}
+            style={{
+              backgroundColor: '#f8fafc',
+              border: '1px solid #cbd5e1',
+              borderRadius: '6px',
+              padding: '4px 10px',
+              fontSize: '12px',
+              color: '#334155',
+              cursor: 'pointer',
+              fontWeight: '500',
+            }}
+          >
+            เดือนนี้
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const r = getLastDaysRange(30);
+              setDstart(r.dstart);
+              setDend(r.dend);
+            }}
+            style={{
+              backgroundColor: '#f8fafc',
+              border: '1px solid #cbd5e1',
+              borderRadius: '6px',
+              padding: '4px 10px',
+              fontSize: '12px',
+              color: '#334155',
+              cursor: 'pointer',
+              fontWeight: '500',
+            }}
+          >
+            30 วันล่าสุด
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const r = getPreviousFiscalYearRange();
+              setDstart(r.dstart);
+              setDend(r.dend);
+            }}
+            style={{
+              backgroundColor: '#f8fafc',
+              border: '1px solid #cbd5e1',
+              borderRadius: '6px',
+              padding: '4px 10px',
+              fontSize: '12px',
+              color: '#334155',
+              cursor: 'pointer',
+              fontWeight: '500',
+            }}
+          >
+            ปีงบก่อนหน้า
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const r = getFullFiscalYearRange();
+              setDstart(r.dstart);
+              setDend(r.dend);
+            }}
+            style={{
+              backgroundColor: '#f8fafc',
+              border: '1px solid #cbd5e1',
+              borderRadius: '6px',
+              padding: '4px 10px',
+              fontSize: '12px',
+              color: '#334155',
+              cursor: 'pointer',
+              fontWeight: '500',
+            }}
+          >
+            ปีงบเต็มปี (ต.ค. - ก.ย.)
+          </button>
+        </div>
+
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '14px', alignItems: 'flex-end' }}>
           {/* Date Range Controls */}
           <div>
@@ -361,8 +477,8 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
             ลงรหัสแล้ว ({stats.coded})
           </button>
 
-          <span style={{ marginLeft: 'auto', fontSize: '12px', color: '#94a3b8' }}>
-            ช่วงเวลาตามคำสั่ง: ปีงบประมาณ 2567-2569 (2023-10-01 - 2026-09-30)
+          <span style={{ marginLeft: 'auto', fontSize: '12px', color: '#64748b', fontWeight: '500' }}>
+            ช่วงวันที่ค้นหา: {dstart} ถึง {dend}
           </span>
         </div>
       </div>
