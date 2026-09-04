@@ -114,5 +114,39 @@ describe('suggestHigherDrg', () => {
 
     const result = await suggestHigherDrg(baseCase, ['FAIL', 'A419']);
     expect(result.suggestions.some((s) => s.pdx === 'A419' || s.sdx.includes('A419'))).toBe(true);
+    expect(result.failures).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'FAIL' })]));
+  });
+
+  it('reports progress and caps candidate permutations', async () => {
+    const progress: number[] = [];
+    vi.spyOn(grouperClient, 'calculateDrg').mockResolvedValue({ status: 200, data: [{ drg: '04010', adjrw: 1 }] });
+    const result = await suggestHigherDrg(baseCase, Array.from({ length: 40 }, (_, index) => `A${String(index + 10).padStart(3, '0')}`), { maxCandidates: 31, onProgress: (event) => progress.push(event.completed) });
+    expect(result.suggestions).toHaveLength(0);
+    expect(progress.at(-1)).toBe(60);
+  });
+
+  it('returns a partial result with cancellation state when a candidate request is aborted', async () => {
+    const controller = new AbortController();
+    let callCount = 0;
+    vi.spyOn(grouperClient, 'calculateDrg').mockImplementation(async () => {
+      callCount += 1;
+      if (callCount === 2) {
+        controller.abort();
+        throw new DOMException('cancelled', 'AbortError');
+      }
+      return { status: 200, data: [{ drg: '04010', adjrw: 1 }] };
+    });
+
+    const result = await suggestHigherDrg(baseCase, ['A419', 'I10'], { signal: controller.signal });
+    expect(result.cancelled).toBe(true);
+    expect(result.baseline.drg).toBe('04010');
+    expect(result.failures).toHaveLength(0);
+  });
+
+  it('preserves baseline Grouper error and warning fields for the UI', async () => {
+    vi.spyOn(grouperClient, 'calculateDrg').mockResolvedValue({ status: 200, data: [{ drg: '04010', adjrw: 1, err: 'E03', warn: 'W01' }] });
+    const result = await suggestHigherDrg(baseCase, []);
+    expect(result.baseline.error).toBe('E03');
+    expect(result.baseline.warning).toBe('W01');
   });
 });

@@ -7,6 +7,13 @@ import {
   fetchCaseDetail,
   fetchUsageItems,
   fetchCaseWorklist,
+  fetchCasePage,
+  exportCaseWorklist,
+  MAX_EXPORT_ROWS,
+  executeSqlViaApi,
+  QUERY_REGISTRY,
+  CASE_COUNT_SQL,
+  validateWorklistQuery,
   retrieveBmsSession,
   extractConnectionConfig,
 } from '@/services/cmiApi';
@@ -20,18 +27,62 @@ describe('cmiApi read-only guards', () => {
   });
 
   it('rejects any SQL statement containing write operations', () => {
-    expect(() => assertCmiQueryIsReadOnly('DELETE FROM ipt WHERE an = :an')).toThrow(
-      /read-only/,
-    );
-    expect(() => assertCmiQueryIsReadOnly('UPDATE ipt SET pdx = "A419"')).toThrow(
-      /read-only/,
-    );
-    expect(() => assertCmiQueryIsReadOnly('INSERT INTO iptdiag VALUES (1)')).toThrow(
-      /read-only/,
-    );
-    expect(() => assertCmiQueryIsReadOnly('DROP TABLE patient')).toThrow(
-      /read-only/,
-    );
+    for (const sql of [
+      'INSERT INTO iptdiag VALUES (1)',
+      'UPDATE ipt SET pdx = "A419"',
+      'DELETE FROM ipt WHERE an = :an',
+      'MERGE INTO ipt USING x ON true WHEN MATCHED THEN UPDATE SET pdx = "A419"',
+      'CREATE TABLE x (id int)',
+      'ALTER TABLE ipt ADD COLUMN x int',
+      'DROP TABLE patient',
+      'TRUNCATE ipt',
+      'CALL refresh_cmi()',
+      'DO $$ BEGIN NULL; END $$',
+      'COPY ipt TO STDOUT',
+    ]) {
+      expect(() => assertCmiQueryIsReadOnly(sql)).toThrow(/read-only/);
+    }
+  });
+
+  it('rejects a read-only SQL string unless it is in the approved registry', async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+    const config = { apiUrl: 'https://bms.test', databaseType: 'postgresql' as const, databaseSupportStatus: 'supported' as const, appIdentifier: 'test' };
+    await expect(executeSqlViaApi('SELECT * FROM patient', config)).rejects.toThrow(/approved query registry/);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(Object.keys(QUERY_REGISTRY)).toEqual(['casePage', 'caseCount', 'worklistSummary', 'caseDetail', 'usagePage', 'caseExport']);
+    expect(QUERY_REGISTRY.caseCount).toBe(CASE_COUNT_SQL);
+  });
+
+  it('validates date range, deterministic pagination and page size', () => {
+    expect(validateWorklistQuery({ dstart: '2023-10-01', dend: '2026-09-30', pageSize: 1000 }).pageSize).toBe(100);
+    expect(() => validateWorklistQuery({ dstart: '2026-01-01', dend: '2025-01-01' })).toThrow(/วันที่เริ่มต้น/);
+    expect(() => validateWorklistQuery({ dstart: '2023-10-01', dend: '2026-09-30', pageSize: Number.NaN })).toThrow(/จำนวนรายการ/);
+    expect(() => validateWorklistQuery({ dstart: '2023-10-01', dend: '2026-09-30', sort: 'an' })).toThrow(/เรียงลำดับ/);
+  });
+
+  it('preserves the timestamp in the keyset cursor returned by PostgreSQL', async () => {
+    const rows = [
+      { an: '1001', dchdate: '2026-08-07T14:30:00.000Z', pdx: 'J189', sex: 'ชาย', age: 60, los: 1 },
+      { an: '1002', dchdate: '2026-08-06T14:30:00.000Z', pdx: 'I10', sex: 'หญิง', age: 55, los: 2 },
+    ];
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { sql: string };
+      if (body.sql.includes('total_adjrw')) return { ok: true, status: 200, json: async () => ({ data: [{ total_count: 2, uncoded_count: 0, coded_count: 2, total_adjrw: 2, total_income: 2 }] }) };
+      if (body.sql.includes('COUNT(*)::int AS total_count')) return { ok: true, status: 200, json: async () => ({ data: [{ total_count: 2 }] }) };
+      return { ok: true, status: 200, json: async () => ({ data: rows }) };
+    });
+    globalThis.fetch = fetchMock;
+    const config = { apiUrl: 'https://bms.test', databaseType: 'postgresql' as const, databaseSupportStatus: 'supported' as const, appIdentifier: 'test' };
+    const result = await fetchCasePage({ dstart: '2023-10-01', dend: '2026-09-30', pageSize: 1 }, config);
+    expect(result.nextCursor).toBeTruthy();
+
+    await fetchCasePage({ dstart: '2023-10-01', dend: '2026-09-30', pageSize: 1, cursor: result.nextCursor ?? undefined }, config);
+    const cursorValues = fetchMock.mock.calls.slice(3).map((call) => {
+      const request = call[1] as RequestInit;
+      return (JSON.parse(String(request.body)) as { params?: { cursor_date?: { value?: string } } }).params?.cursor_date?.value;
+    });
+    expect(cursorValues).toContain('2026-08-07 14:30:00.000');
   });
 });
 
@@ -127,10 +178,52 @@ describe('retrieveBmsSession', () => {
     expect(config.apiUrl).toBe('http://192.168.1.100:45011');
     expect(config.databaseType).toBe('postgresql');
   });
+
+  it('extracts the nested CMI-Dashboard session contract and bearer token', () => {
+    const config = extractConnectionConfig({
+      MessageCode: 200,
+      result: {
+        key_value: 'jwt-token',
+        user_info: {
+          bms_url: 'https://bms.example.test/',
+          bms_session_code: 'session-token',
+          bms_database_type: 'PostgreSQL',
+          hospital_code: '10929',
+          location: 'Kantharalak Hospital',
+        },
+      },
+    });
+    expect(config).toMatchObject({ apiUrl: 'https://bms.example.test', bearerToken: 'session-token', databaseType: 'postgresql', hospitalCode: '10929' });
+  });
+
+  it('marks a session unsupported when its hospital code is missing or malformed', () => {
+    const config = extractConnectionConfig({ api_url: 'https://bms.example.test', database_type: 'PostgreSQL', hospital_code: '123' });
+    expect(config.databaseSupportStatus).toBe('unsupported');
+    expect(config.hospitalCode).toBeUndefined();
+  });
+
+  it('accepts the live SQL response data envelope and masks PII at the mapper boundary', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ data: [{ an: '1001', hn: '0054321', ptname: 'นาย สมชาย ใจดี', pdx: 'J189', age: '68', los: '6', dchdate: '2026-08-07' }] }) });
+    const result = await fetchCasePage({ dstart: '2023-10-01', dend: '2026-09-30' }, { apiUrl: 'https://bms.test', databaseType: 'postgresql', databaseSupportStatus: 'supported', appIdentifier: 'test' });
+    expect(result.items[0]).toMatchObject({ hn: '00***21', ptname: 'นาย ส*** ใ***', pdx: 'J189' });
+  });
+
+  it('caps export results at 10,000 rows and reports truncation', async () => {
+    const rows = Array.from({ length: MAX_EXPORT_ROWS + 1 }, (_, index) => ({
+      an: String(index + 1), hn: '0012345', ptname: 'นาย ทดสอบ', sex: 'ชาย', age: 60, los: 1, pdx: 'J189',
+    }));
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ data: rows }) });
+    const result = await exportCaseWorklist(
+      { dstart: '2023-10-01', dend: '2026-09-30' },
+      { apiUrl: 'https://bms.test', databaseType: 'postgresql', databaseSupportStatus: 'supported', appIdentifier: 'test' },
+    );
+    expect(result.rows).toHaveLength(MAX_EXPORT_ROWS);
+    expect(result.truncated).toBe(true);
+  });
 });
 
 describe('Session Persistence Utilities', () => {
-  it('persists and retrieves session ID from localStorage and clears on remove', async () => {
+  it('persists and retrieves session ID from a cookie and clears on remove', async () => {
     const { persistBmsSessionId, getStoredBmsSessionId, removeStoredBmsSessionId } = await import('@/services/cmiApi');
 
     persistBmsSessionId('test-session-persist-456');

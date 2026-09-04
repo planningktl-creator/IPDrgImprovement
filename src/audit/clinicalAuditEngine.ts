@@ -1,3 +1,5 @@
+import { getPayerRateConfig, resolvePayerRate, type PayerRateConfig } from '@/config/reimbursementRates';
+
 /**
  * Clinical Coding Accuracy & DRG Audit Engine
  * Based on Thai DRG V6.3.x rules, TCMC guidelines, and CMI@MOPH training materials
@@ -31,6 +33,7 @@ export interface ReimbursementEstimate {
   baselineRevenue: number;
   optimizedRevenue?: number;
   deltaRevenue?: number;
+  source?: 'runtime-config';
 }
 
 export interface ClinicalAuditResult {
@@ -59,6 +62,9 @@ export interface AuditCaseInput {
   admwt?: number | null; // admission weight in kg
   dchtype?: string | null;
   pttype?: string | null;
+  pttypeName?: string | null;
+  dchdate?: string;
+  reimbursementRates?: PayerRateConfig[];
 }
 
 // Known Symptom & Sign codes (ICD-10 Chapter XVIII: R00-R99)
@@ -86,6 +92,13 @@ const NON_OR_PROCEDURES = new Set([
 const cleanCode = (code?: string | null): string =>
   (code || '').trim().toUpperCase().replace(/\./g, '').replace(/[^A-Z0-9]/g, '');
 
+function hasInvalidCode(value: string | null | undefined, procedure = false): boolean {
+  const raw = (value ?? '').trim().toUpperCase();
+  if (!raw) return false;
+  const normalized = cleanCode(raw);
+  return !/^[A-Z0-9.]+$/.test(raw) || normalized.length < 3 || normalized.length > 8 || (procedure && !/^\d+$/.test(normalized));
+}
+
 /**
  * Evaluates clinical coding accuracy and DRG audit rules for an inpatient case
  */
@@ -96,6 +109,16 @@ export function auditClinicalCase(input: AuditCaseInput): ClinicalAuditResult {
   const procList = input.proc.map(cleanCode).filter(Boolean);
   const age = input.age ?? null;
   const los = input.los > 0 ? input.los : 1;
+
+  if (hasInvalidCode(input.pdx)) {
+    issues.push({ id: 'pdx-invalid-format', type: 'error', category: 'pdx', title: 'รูปแบบ PDx ไม่ถูกต้อง', description: 'รหัสโรคหลักมีอักขระหรือความยาวที่ไม่รองรับ จึงยังไม่ควรส่งเข้า Grouper', suggestedAction: 'ตรวจสอบ ICD-10 และรูปแบบจุดทศนิยมก่อนวิเคราะห์' });
+  }
+  input.sdx.forEach((code, index) => {
+    if (hasInvalidCode(code)) issues.push({ id: `sdx-invalid-format-${index}`, type: 'error', category: 'sdx', title: `รูปแบบ SDx ลำดับที่ ${index + 1} ไม่ถูกต้อง`, description: 'รหัสโรคร่วมมีอักขระหรือความยาวที่ไม่รองรับ และถูกกันออกจากการคำนวณที่ปลอดภัย', suggestedAction: 'ตรวจสอบ ICD-10 ของโรคร่วมจากเอกสารต้นทาง' });
+  });
+  input.proc.forEach((code, index) => {
+    if (hasInvalidCode(code, true)) issues.push({ id: `proc-invalid-format-${index}`, type: 'error', category: 'procedure', title: `รูปแบบ Procedure ลำดับที่ ${index + 1} ไม่ถูกต้อง`, description: 'รหัสหัตถการต้องเป็นรหัส ICD-9-CM ตัวเลขที่มีรูปแบบรองรับ', suggestedAction: 'ตรวจสอบรหัสหัตถการจากเวชระเบียนก่อนเรียก Grouper' });
+  });
 
   // 1. Principal Diagnosis (PDx) Audits
   if (!pdx) {
@@ -241,6 +264,21 @@ export function auditClinicalCase(input: AuditCaseInput): ClinicalAuditResult {
   }
 
   // 4. Procedure (ICD-9-CM) Audits
+  const seenProc = new Set<string>();
+  procList.forEach((proc, idx) => {
+    if (seenProc.has(proc)) {
+      issues.push({
+        id: `proc-dup-${proc}-${idx}`,
+        type: 'warning',
+        category: 'procedure',
+        title: `รหัสหัตถการซ้ำกันเอง (${proc})`,
+        description: `พบ Procedure ${proc} ซ้ำมากกว่า 1 ครั้งในชุดข้อมูล อาจทำให้ผล Grouper ไม่ตรงกับเอกสารต้นทาง`,
+        suggestedAction: 'ตรวจสอบลำดับและลบรหัสหัตถการที่ซ้ำโดยไม่ตั้งใจ',
+      });
+    }
+    seenProc.add(proc);
+  });
+
   // 4.1 Mechanical Ventilation Check
   const hasIntubation = procList.includes('9604');
   const hasMechVent = procList.some((p) => p.startsWith('967'));
@@ -352,26 +390,16 @@ export function auditClinicalCase(input: AuditCaseInput): ClinicalAuditResult {
 
   // 7. Base Rate & Reimbursement Estimation
   const activeAdjrw = input.adjrw ?? input.rw ?? 0;
-  const reimbursements: ReimbursementEstimate[] = [
-    {
-      scheme: 'ucs',
-      schemeName: 'หลักประกันสุขภาพถ้วนหน้า (UCS บัตรทอง)',
-      baseRate: 8350, // อัตราฐานเฉลี่ยในเขต รพ.กันทรลักษ์
-      baselineRevenue: Math.round(activeAdjrw * 8350),
-    },
-    {
-      scheme: 'ofc',
-      schemeName: 'สวัสดิการข้าราชการ (OFC กรมบัญชีกลาง)',
-      baseRate: 7500, // อัตราฐานเฉลี่ย 6,500 - 9,000 บาท
-      baselineRevenue: Math.round(activeAdjrw * 7500),
-    },
-    {
-      scheme: 'sss',
-      schemeName: 'ประกันสังคม (SSS)',
-      baseRate: activeAdjrw >= 2.0 ? 12000 : 11000, // เกณฑ์ AdjRW >= 2.0 ได้ 12,000 บาททุกกรณีตามสไลด์
-      baselineRevenue: Math.round(activeAdjrw * (activeAdjrw >= 2.0 ? 12000 : 11000)),
-    },
-  ];
+  const reimbursementRates = input.reimbursementRates ?? getPayerRateConfig();
+  const selectedRate = resolvePayerRate({ pttype: input.pttype, pttypeName: input.pttypeName, dchdate: input.dchdate }, reimbursementRates);
+  const applicableRates = selectedRate ? [selectedRate] : [];
+  const reimbursements: ReimbursementEstimate[] = applicableRates.map((rate) => ({
+    scheme: rate.scheme,
+    schemeName: rate.label,
+    baseRate: rate.baseRate,
+    baselineRevenue: Math.round(activeAdjrw * rate.baseRate),
+    source: 'runtime-config',
+  }));
 
   // 8. Quality Score Calculation (0 - 100)
   let score = 100;

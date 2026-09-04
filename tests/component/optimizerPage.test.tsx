@@ -121,8 +121,8 @@ describe('OptimizerPage Component', () => {
 
     // Verify suggestions table contains the ranked items
     await waitFor(() => {
-      expect(screen.getByText('18010')).toBeInTheDocument();
-      expect(screen.getByText('+1.7980')).toBeInTheDocument(); // 2.85 - 1.052 = 1.798
+      expect(screen.getAllByText('18010').length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/\+1\.7980/).length).toBeGreaterThan(0); // 2.85 - 1.052 = 1.798
       expect(screen.getByText(/ระบบตรวจสอบความถูกต้องของรหัสโรคและเกณฑ์ DRG/i)).toBeInTheDocument();
       expect(screen.getByText(/คะแนนคุณภาพการให้รหัส/i)).toBeInTheDocument();
     });

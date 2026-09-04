@@ -42,6 +42,8 @@ export interface CmiCaseRow {
   sdx10?: string | null;
   sdx11?: string | null;
   sdx12?: string | null;
+  /** Normalized diagnosis list used by the optimizer and audit layer. */
+  sdx?: string[];
   extCause?: string | null;
   proc1?: string | null;
   proc2?: string | null;
@@ -55,6 +57,26 @@ export interface CmiCaseRow {
   proc10?: string | null;
   proc11?: string | null;
   proc12?: string | null;
+  proc13?: string | null;
+  proc14?: string | null;
+  proc15?: string | null;
+  proc16?: string | null;
+  proc17?: string | null;
+  proc18?: string | null;
+  proc19?: string | null;
+  proc20?: string | null;
+  proc21?: string | null;
+  proc22?: string | null;
+  proc23?: string | null;
+  proc24?: string | null;
+  proc25?: string | null;
+  proc26?: string | null;
+  proc27?: string | null;
+  proc28?: string | null;
+  proc29?: string | null;
+  proc30?: string | null;
+  /** Normalized procedure list used by the optimizer and audit layer. */
+  proc?: string[];
   income?: number;
   ucMoney?: number;
   paidMoney?: number;
@@ -84,7 +106,50 @@ export interface WorklistQueryParams {
   dend: string;   // 'YYYY-MM-DD'
   ward?: string;
   statusFilter?: 'all' | 'uncoded' | 'coded';
+  scheme?: PayerScheme | 'all';
   search?: string;
+  pageSize?: number;
+  cursor?: string;
+  sort?: 'dchdate' | 'adjrw' | 'an';
+  direction?: 'asc' | 'desc';
+  /** Backward-compatible aliases accepted at the service boundary. */
   limit?: number;
   offset?: number;
 }
+
+export type PayerScheme = 'ucs' | 'ofc' | 'sss' | 'other';
+
+export interface CaseCursor {
+  sortValue: string | number | null;
+  an: string;
+}
+
+export interface CasePageResult {
+  items: CmiCaseRow[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  count: number | null;
+  /** Backward-compatible alias used by the original UI. */
+  totalCount: number | null;
+  summary: CaseSummary;
+  fetchedAt: string;
+}
+
+export interface CaseSummary {
+  total: number;
+  uncoded: number;
+  coded: number;
+  totalAdjrw: number;
+  averageCmi: number;
+  totalIncome: number;
+  estimatedRevenue: number | null;
+  revenueRateLabel: string | null;
+}
+
+export type QueryRegistryKey =
+  | 'casePage'
+  | 'caseCount'
+  | 'worklistSummary'
+  | 'caseDetail'
+  | 'usagePage'
+  | 'caseExport';

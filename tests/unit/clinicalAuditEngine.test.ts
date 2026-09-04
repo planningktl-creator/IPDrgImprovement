@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { auditClinicalCase } from '@/audit/clinicalAuditEngine';
 
+const configuredRates = [
+  { scheme: 'ucs' as const, label: 'UCS', baseRate: 8350, effectiveFrom: '2023-10-01', matchTokens: ['บัตรทอง', 'ucs'] },
+  { scheme: 'ofc' as const, label: 'OFC', baseRate: 7500, effectiveFrom: '2023-10-01', matchTokens: ['ข้าราชการ', 'ofc'] },
+  { scheme: 'sss' as const, label: 'SSS', baseRate: 12000, effectiveFrom: '2023-10-01', matchTokens: ['ประกันสังคม', 'sss'] },
+];
+
 describe('ClinicalAuditEngine', () => {
   it('detects missing principal diagnosis and assigns grade D with Error Code 1 warning', () => {
     const res = auditClinicalCase({
@@ -136,7 +142,7 @@ describe('ClinicalAuditEngine', () => {
     expect(highRes.issues.some((i) => i.id === 'outlier-high')).toBe(true);
   });
 
-  it('calculates multi-payer reimbursement estimates for UCS, OFC, and SSS', () => {
+  it('calculates reimbursement only for the configured payer and effective date', () => {
     const res = auditClinicalCase({
       an: '10011',
       los: 4,
@@ -144,6 +150,8 @@ describe('ClinicalAuditEngine', () => {
       sdx: ['I10'],
       proc: ['3606'],
       adjrw: 2.5,
+      pttypeName: 'บัตรทอง',
+      reimbursementRates: configuredRates,
     });
 
     const ucs = res.reimbursements.find((r) => r.scheme === 'ucs');
@@ -151,7 +159,20 @@ describe('ClinicalAuditEngine', () => {
     const sss = res.reimbursements.find((r) => r.scheme === 'sss');
 
     expect(ucs?.baselineRevenue).toBe(Math.round(2.5 * 8350));
-    expect(ofc?.baselineRevenue).toBe(Math.round(2.5 * 7500));
-    expect(sss?.baselineRevenue).toBe(Math.round(2.5 * 12000)); // AdjRW >= 2.0 gets 12,000 baht base rate
+    expect(ofc).toBeUndefined();
+    expect(sss).toBeUndefined();
+
+    const ofcResult = auditClinicalCase({
+      an: '10011-ofc', los: 4, pdx: 'I210', sdx: ['I10'], proc: ['3606'], adjrw: 2.5,
+      pttypeName: 'ข้าราชการ', reimbursementRates: configuredRates,
+    });
+    expect(ofcResult.reimbursements[0]?.baselineRevenue).toBe(Math.round(2.5 * 7500));
+  });
+
+  it('surfaces duplicate and invalid diagnosis/procedure codes for coder review', () => {
+    const result = auditClinicalCase({ an: '10012', los: 2, pdx: 'J18.9', sdx: ['I10', 'I10', 'BAD!'], proc: ['9914', '9914', 'ABCD'] });
+    expect(result.issues.some((issue) => issue.id.startsWith('sdx-dup-self'))).toBe(true);
+    expect(result.issues.some((issue) => issue.id.includes('invalid-format'))).toBe(true);
+    expect(result.issues.some((issue) => issue.id.startsWith('proc-dup'))).toBe(true);
   });
 });

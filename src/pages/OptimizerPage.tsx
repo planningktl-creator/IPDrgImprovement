@@ -1,967 +1,163 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import {
-  cmiCaseToDrgInput,
-} from '@/cmi/caseAdapter';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { AlertTriangle, ArrowLeft, CheckCircle2, CircleStop, Clock3, Database, LoaderCircle, Plus, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { cmiCaseToDrgInput } from '@/cmi/caseAdapter';
 import type { CmiCaseRow, UsageLite } from '@/cmi/caseContract';
-import {
-  extractCandidates,
-  type DxCandidate,
-} from '@/suggest/candidateExtractor';
-import {
-  suggestHigherDrg,
-  type Suggestion,
-  type BaselineResult,
-} from '@/suggest/suggestEngine';
-import {
-  fetchCaseDetail,
-  fetchUsageItems,
-  retrieveBmsSession,
-  extractConnectionConfig,
-  getStoredBmsSessionId,
-  persistBmsSessionId,
-  type BmsConnectionConfig,
-} from '@/services/cmiApi';
+import { extractCandidates, cleanIcdCode, type DxCandidate } from '@/suggest/candidateExtractor';
+import { suggestHigherDrg, type BaselineResult, type SuggestFailure, type Suggestion, type SuggestProgress } from '@/suggest/suggestEngine';
+import { fetchCaseDetail, fetchUsageItems, getRowProcedures, getRowSdx, isBmsSessionFailure, type BmsConnectionConfig } from '@/services/cmiApi';
 import { DEFAULT_HCODE } from '@/drg/grouperContract';
-import {
-  Search,
-  AlertTriangle,
-  PlusCircle,
-  Database,
-  Activity,
-  ChevronDown,
-  ChevronUp,
-  ArrowLeft,
-  ArrowRight,
-  Sparkles,
-  TrendingUp,
-} from 'lucide-react';
 import { auditClinicalCase, type ClinicalAuditResult } from '@/audit/clinicalAuditEngine';
 import { ClinicalAuditPanel } from '@/components/ClinicalAuditPanel';
+import type { SessionStatus } from '@/session/useBmsSession';
+import { getPayerRateConfig } from '@/config/reimbursementRates';
 
 export interface OptimizerPageProps {
   initialAn?: string;
   onBackToWorklist?: () => void;
   externalSessionId?: string;
   externalConfig?: BmsConnectionConfig | null;
-  externalStatus?: 'idle' | 'connected' | 'demo' | 'error';
+  externalStatus?: SessionStatus;
   onConnectSession?: (sid: string) => Promise<void>;
+  onSessionError?: () => void;
 }
 
-export const OptimizerPage: React.FC<OptimizerPageProps> = ({
-  initialAn,
-  onBackToWorklist,
-  externalSessionId,
-  externalConfig,
-  externalStatus,
-  onConnectSession,
-}) => {
-  // Session & Connection State
-  const [bmsSessionId, setBmsSessionId] = useState<string>(() => {
-    if (externalSessionId) return externalSessionId;
-    return getStoredBmsSessionId();
-  });
-  const [connectionConfig, setConnectionConfig] = useState<BmsConnectionConfig | null>(externalConfig ?? null);
-  const [sessionStatus, setSessionStatus] = useState<'idle' | 'connected' | 'demo' | 'error'>(externalStatus ?? 'idle');
-  const [hospitalCode, setHospitalCode] = useState<string>(DEFAULT_HCODE);
-  const [baseRate, setBaseRate] = useState<number>(8350);
+const isAbort = (error: unknown): boolean =>
+  (error instanceof DOMException && error.name === 'AbortError') ||
+  (error instanceof Error && error.name === 'AbortError');
 
-  // Search & Case State (No hardcoded default AN)
-  const [anInput, setAnInput] = useState<string>(initialAn || '');
-  const [loading, setLoading] = useState<boolean>(false);
-  const [loadingStep, setLoadingStep] = useState<string>('');
+function CodeSet({ title, codes, tone = 'neutral' }: { title: string; codes: string[]; tone?: 'pdx' | 'sdx' | 'proc' | 'neutral' }) {
+  return <div className="code-set"><span className="field-label">{title}</span>{codes.length > 0 ? <div className="code-list">{codes.map((code, index) => <span className={`code-pill code-${tone}`} key={`${code}-${index}`}>{code}</span>)}</div> : <span className="muted">ไม่มีข้อมูล</span>}</div>;
+}
+
+function UsageEvidence({ items }: { items: UsageLite[] }) {
+  if (items.length === 0) return <div className="empty-inline"><Database size={18} />ไม่พบรายการยา/เวชภัณฑ์สำหรับสร้างหลักฐาน</div>;
+  return <div className="evidence-list">{items.map((item, index) => <article className="evidence-item" key={`${item.hosGuid ?? item.icode ?? 'item'}-${index}`}><div className="evidence-marker">{index + 1}</div><div><strong>{item.itemName || item.icode || 'รายการไม่ระบุชื่อ'}</strong><span>{item.needOrderReason || item.prescReason || 'ไม่มีเหตุผลกำกับรายการ'}</span>{item.prescReason && <small>presc: {item.prescReason}</small>}</div></article>)}</div>;
+}
+
+function SuggestionCard({ suggestion, index }: { suggestion: Suggestion; index: number }) {
+  return <article className="suggestion-card"><div className="suggestion-rank">{String(index + 1).padStart(2, '0')}</div><div className="suggestion-main"><div className="suggestion-title"><strong>{suggestion.kind === 'swap_pdx' ? 'สลับ PDx' : 'เพิ่ม SDx'}</strong><span className="code-pill code-pdx">{suggestion.drg}</span></div><p>{suggestion.reason}</p><div className="suggestion-codes"><span>PDx <b>{suggestion.pdx}</b></span><span>AdjRW <b>{suggestion.adjrw != null ? suggestion.adjrw.toFixed(4) : '—'}</b></span><span className="delta-positive">Δ +{suggestion.delta?.toFixed(4) ?? '—'}</span></div>{suggestion.evidence && suggestion.evidence.length > 0 && <details><summary>ดูหลักฐาน ({suggestion.evidence.length})</summary><ul>{suggestion.evidence.map((evidence) => <li key={evidence}>{evidence}</li>)}</ul></details>}</div></article>;
+}
+
+function ConnectionPrompt({ status, onConnect }: { status: SessionStatus; onConnect?: (sid: string) => Promise<void> }) {
+  const [sessionId, setSessionId] = useState('');
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!onConnect || !sessionId.trim()) return;
+    setBusy(true); setError(null);
+    try { await onConnect(sessionId.trim()); setSessionId(''); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'เชื่อมต่อไม่สำเร็จ'); }
+    finally { setBusy(false); }
+  };
+  return <section className="connection-card compact"><div className="connection-icon"><ShieldCheck size={20} /></div><div className="connection-copy"><span className="eyebrow">HIS ACCESS REQUIRED</span><h2>ต้องเชื่อมต่อ HIS ก่อนวิเคราะห์เคสจริง</h2><p>{status === 'unsupported' ? 'BMS Session นี้ไม่ใช่ PostgreSQL หรือไม่มี API URL ที่รองรับ' : 'ใช้ BMS Session ID เพื่อดึง Case Detail และ Usage แบบ read-only'}</p></div>{onConnect && <form className="connection-form" onSubmit={submit}><label htmlFor="optimizer-session-id">BMS Session ID</label><div className="input-with-action"><input id="optimizer-session-id" value={sessionId} onChange={(event) => setSessionId(event.target.value)} placeholder="ระบุ BMS Session ID" autoComplete="off" /><button className="button button-primary" disabled={busy || !sessionId.trim()} type="submit">{busy ? <LoaderCircle className="spin" size={16} /> : 'เชื่อมต่อ'}</button></div>{error && <span className="field-error" role="alert">{error}</span>}</form>}</section>;
+}
 
+export function OptimizerPage({ initialAn, onBackToWorklist, externalConfig, externalStatus = 'idle', onConnectSession, onSessionError }: OptimizerPageProps) {
+  const [anInput, setAnInput] = useState(initialAn ?? '');
+  const [loading, setLoading] = useState(false);
+  const [loadingStep, setLoadingStep] = useState('');
+  const [progress, setProgress] = useState<SuggestProgress | null>(null);
+  const [cancelled, setCancelled] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [currentCase, setCurrentCase] = useState<CmiCaseRow | null>(null);
   const [usageItems, setUsageItems] = useState<UsageLite[]>([]);
   const [candidates, setCandidates] = useState<DxCandidate[]>([]);
-  const [manualCode, setManualCode] = useState<string>('');
-
-  // Grouper Result State
+  const [manualCode, setManualCode] = useState('');
   const [baseline, setBaseline] = useState<BaselineResult | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
-  const [expandedEvidence, setExpandedEvidence] = useState<Record<string, boolean>>({});
+  const [failures, setFailures] = useState<SuggestFailure[]>([]);
+  const controllerRef = useRef<AbortController | null>(null);
+  const requestRef = useRef(0);
 
-  const handleConnectSession = useCallback(async (sid: string) => {
-    const cleanSid = sid.trim();
-    if (!cleanSid) {
-      setConnectionConfig(null);
-      setSessionStatus('idle');
-      return;
-    }
+  const isDemo = externalStatus === 'demo';
+  const rates = useMemo(() => getPayerRateConfig(isDemo ? 'demo' : 'runtime'), [isDemo]);
+  const hcode = externalConfig?.hospitalCode ?? DEFAULT_HCODE;
 
-    try {
-      setLoadingStep('กำลังดึงข้อมูลการเชื่อมต่อ BMS Session...');
-      const raw = await retrieveBmsSession(cleanSid);
-      const conf = extractConnectionConfig(raw);
-      setConnectionConfig(conf);
-      if (raw.hospital_code && /^\d{5}$/.test(raw.hospital_code)) {
-        setHospitalCode(raw.hospital_code);
-      }
-      setSessionStatus('connected');
-      if (onConnectSession) {
-        await onConnectSession(cleanSid);
-      }
-    } catch (err) {
-      setError(`ไม่สามารถเชื่อมต่อ BMS Session: ${(err as Error).message}`);
-      setSessionStatus('error');
-    }
-  }, [onConnectSession]);
-
-  useEffect(() => {
-    if (externalConfig) {
-      setConnectionConfig(externalConfig);
-    }
-  }, [externalConfig]);
-
-  useEffect(() => {
-    if (externalStatus) {
-      setSessionStatus(externalStatus);
-    }
-  }, [externalStatus]);
-
-  // Connect on mount if session was passed in URL query param or storage
-  useEffect(() => {
-    let ignore = false;
-    if (bmsSessionId) {
-      retrieveBmsSession(bmsSessionId)
-        .then((raw) => {
-          if (!ignore) {
-            const conf = extractConnectionConfig(raw);
-            setConnectionConfig(conf);
-            persistBmsSessionId(bmsSessionId);
-            if (raw.hospital_code && /^\d{5}$/.test(raw.hospital_code)) {
-              setHospitalCode(raw.hospital_code);
-            }
-            setSessionStatus('connected');
-          }
-        })
-        .catch((err) => {
-          if (!ignore) {
-            setError(`ไม่สามารถเชื่อมต่อ BMS Session: ${(err as Error).message}`);
-            setSessionStatus('error');
-          }
-        });
-
-      if (typeof window !== 'undefined' && window.location.search.includes('bms-session-id')) {
-        const cleanUrl = new URL(window.location.href);
-        cleanUrl.searchParams.delete('bms-session-id');
-        window.history.replaceState(window.history.state, '', cleanUrl.toString());
-      }
-    }
-
-    return () => {
-      ignore = true;
-    };
-  }, [bmsSessionId]);
+  const stopAnalysis = useCallback(() => {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+  }, []);
 
   const handleLoadAndOptimize = useCallback(async (targetAn?: string, additionalCandidate?: string) => {
     const an = (targetAn ?? anInput).trim();
-    if (!an) {
-      setError('กรุณาระบุเลข AN ที่ต้องการค้นหา');
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-    setSuggestions([]);
-    setBaseline(null);
-
+    if (!an) { setError('กรุณาระบุเลข AN ที่ต้องการค้นหา'); return; }
+    stopAnalysis();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const requestId = ++requestRef.current;
+    setAnInput(an); setLoading(true); setCancelled(false); setError(null); setBaseline(null); setSuggestions([]); setFailures([]); setProgress(null); setCandidates([]); setCurrentCase(null);
     try {
-      // Step 1: Fetch Case Detail
-      setLoadingStep('กำลังดึงข้อมูลเคสผู้ป่วยจริง (Case Detail จาก HIS)...');
-      // If sessionStatus is demo (such as during vitest execution), allow fallback
-      const isDemo = sessionStatus === 'demo';
-      const caseRow = await fetchCaseDetail(an, connectionConfig || undefined, { useDemoFallback: isDemo });
-      setCurrentCase(caseRow);
-
-      // Step 2: Fetch Usage & Medication Items
-      setLoadingStep('กำลังดึงรายการยาและเวชภัณฑ์ (Usage/opitemrece)...');
-      const items = await fetchUsageItems(an, connectionConfig || undefined, { useDemoFallback: isDemo });
-      setUsageItems(items);
-
-      // Step 3: Extract evidenced candidates
-      setLoadingStep('กำลังสกัดรหัสวินิจฉัยที่มีหลักฐานกำกับ (Candidate Extraction)...');
-      let extracted = extractCandidates(items);
+      setLoadingStep('กำลังดึงข้อมูลเคสจาก HIS…');
+      const row = await fetchCaseDetail(an, externalConfig ?? undefined, { signal: controller.signal, useDemoFallback: isDemo });
+      if (requestId !== requestRef.current) return;
+      setCurrentCase(row);
+      setLoadingStep('กำลังอ่านรายการยาและเวชภัณฑ์เพื่อสร้างหลักฐาน…');
+      const usage = await fetchUsageItems(an, externalConfig ?? undefined, { signal: controller.signal, useDemoFallback: isDemo });
+      if (requestId !== requestRef.current) return;
+      setUsageItems(usage);
+      setLoadingStep('กำลังสกัดรหัสที่มีหลักฐานกำกับ…');
+      let extracted = extractCandidates(usage);
       if (additionalCandidate) {
-        const cleanAdd = additionalCandidate.trim().toUpperCase().replace(/\./g, '');
-        if (!extracted.some((c) => c.code === cleanAdd)) {
-          extracted = [
-            {
-              code: cleanAdd,
-              source: 'coder_manual',
-              evidence: ['เพิ่มจากคำแนะนำระบบตรวจสอบความถูกต้องทางคลินิก (Clinical Audit)'],
-            },
-            ...extracted,
-          ];
-        }
+        const code = cleanIcdCode(additionalCandidate);
+        if (!/^[A-Z0-9]{3,8}$/.test(code)) throw new Error('รหัสที่เพิ่มต้องเป็น ICD code ที่มีรูปแบบถูกต้อง');
+        if (!extracted.some((item) => item.code === code)) extracted = [{ code, source: 'coder_manual', evidence: ['เพิ่มโดย Coder เพื่อทบทวนเพิ่มเติม'] }, ...extracted];
       }
       setCandidates(extracted);
-
-      // Step 4: Adapt to Grouper input
-      const drgInput = cmiCaseToDrgInput(caseRow, {
-        hcode: hospitalCode,
-        baseRate,
-      });
-
-      // Step 5: Run Grouper baseline and suggest permutations
-      setLoadingStep('กำลังเรียก Grouper ทางการเพื่อคำนวณ Baseline และจัดอันดับรหัสแนะนำ...');
-      const result = await suggestHigherDrg(
-        drgInput,
-        extracted.map((c) => ({
-          code: c.code,
-          reason: `พบในหลักฐานการใช้ยา (${c.source})`,
-          evidence: c.evidence,
-        })),
-      );
-
-      setBaseline(result.baseline);
-      setSuggestions(result.suggestions);
-    } catch (err) {
-      setError((err as Error).message || 'เกิดข้อผิดพลาดในการโหลดเคสหรือคำนวณ DRG');
+      setLoadingStep('กำลังเรียก MOPH Grouper ตามลำดับเพื่อเทียบ DRG…');
+      const input = cmiCaseToDrgInput(row, { hcode });
+      const result = await suggestHigherDrg(input, extracted.map((item) => ({ code: item.code, reason: `พบในหลักฐานการใช้ยา (${item.source})`, evidence: item.evidence })), { signal: controller.signal, maxCandidates: 20, onProgress: setProgress });
+      if (requestId !== requestRef.current) return;
+      setBaseline(result.baseline); setSuggestions(result.suggestions); setFailures(result.failures); setCancelled(result.cancelled);
+    } catch (reason) {
+      if (requestId === requestRef.current) {
+        if (isAbort(reason)) setCancelled(true);
+        else { if (isBmsSessionFailure(reason)) onSessionError?.(); setError(reason instanceof Error ? reason.message : 'เกิดข้อผิดพลาดในการวิเคราะห์เคส'); }
+      }
     } finally {
-      setLoading(false);
-      setLoadingStep('');
+      if (requestId === requestRef.current) { setLoading(false); setLoadingStep(''); controllerRef.current = null; }
     }
-  }, [anInput, connectionConfig, sessionStatus, hospitalCode, baseRate]);
+  }, [anInput, externalConfig, hcode, isDemo, onSessionError, stopAnalysis]);
 
   useEffect(() => {
-    if (initialAn) {
-      setAnInput(initialAn);
-      handleLoadAndOptimize(initialAn);
-    }
-  }, [initialAn, handleLoadAndOptimize]);
+    if (!initialAn) return undefined;
+    const timer = window.setTimeout(() => void handleLoadAndOptimize(initialAn), 0);
+    return () => { window.clearTimeout(timer); stopAnalysis(); };
+  }, [initialAn, handleLoadAndOptimize, stopAnalysis]);
 
-  const handleAddManualCandidate = async () => {
-    const code = manualCode.trim().toUpperCase().replace(/\./g, '');
-    if (!code) return;
-
-    if (!candidates.some((c) => c.code === code)) {
-      const newCand: DxCandidate = {
-        code,
-        source: 'coder_manual',
-        evidence: ['เพิ่มโดย Coder (Manual override)'],
-      };
-      const updated = [...candidates, newCand];
-      setCandidates(updated);
-      setManualCode('');
-
-      if (currentCase) {
-        setLoading(true);
-        setLoadingStep(`กำลังประมวลผล DRG เมื่อเพิ่มรหัส ${code}...`);
-        try {
-          const drgInput = cmiCaseToDrgInput(currentCase, { hcode: hospitalCode, baseRate });
-          const result = await suggestHigherDrg(
-            drgInput,
-            updated.map((c) => ({
-              code: c.code,
-              reason: c.source === 'coder_manual' ? 'Coder เพิ่มเอง' : `พบในหลักฐาน (${c.source})`,
-              evidence: c.evidence,
-            })),
-          );
-          setBaseline(result.baseline);
-          setSuggestions(result.suggestions);
-        } catch (err) {
-          setError((err as Error).message);
-        } finally {
-          setLoading(false);
-          setLoadingStep('');
-        }
-      }
-    }
+  const addManualCandidate = async () => {
+    const code = cleanIcdCode(manualCode);
+    if (!/^[A-Z0-9]{3,8}$/.test(code)) { setError('กรุณาระบุ ICD code ที่ถูกต้อง เช่น A419 หรือ N184'); return; }
+    setManualCode('');
+    await handleLoadAndOptimize(currentCase?.an, code);
   };
 
-  const handleApplyCodeFromAudit = (code: string) => {
-    handleLoadAndOptimize(undefined, code);
-  };
-
-  // Run Clinical Audit on loaded case
   const auditResult = useMemo<ClinicalAuditResult | null>(() => {
     if (!currentCase) return null;
     return auditClinicalCase({
-      an: currentCase.an || '',
-      age: currentCase.age,
-      sex: currentCase.sex,
-      los: currentCase.los ?? 0,
-      pdx: currentCase.pdx,
-      sdx: [currentCase.sdx1, currentCase.sdx2, currentCase.sdx3, currentCase.sdx4].filter(Boolean) as string[],
-      proc: [currentCase.proc1, currentCase.proc2, currentCase.proc3].filter(Boolean) as string[],
-      rw: baseline?.rw ?? currentCase.rw,
-      adjrw: baseline?.adjrw ?? currentCase.adjrw,
+      an: currentCase.an ?? '', age: currentCase.age, sex: currentCase.sex, los: currentCase.los ?? 0, pdx: currentCase.pdx,
+      sdx: getRowSdx(currentCase),
+      proc: getRowProcedures(currentCase),
+      rw: baseline?.rw ?? currentCase.rw, adjrw: baseline?.adjrw ?? currentCase.adjrw, wtlos: baseline?.wtlos, ot: baseline?.ot, pttype: currentCase.pttype, pttypeName: currentCase.pttypeName, dchdate: currentCase.dchdate, reimbursementRates: rates,
     });
-  }, [currentCase, baseline]);
+  }, [baseline, currentCase, rates]);
 
-  const toggleEvidence = (key: string) => {
-    setExpandedEvidence((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
+  const sdx = currentCase ? getRowSdx(currentCase) : [];
+  const proc = currentCase ? getRowProcedures(currentCase) : [];
 
-  const topSuggestion = suggestions.length > 0 ? suggestions[0] : null;
-
-  return (
-    <div style={{ minHeight: 'calc(100vh - 64px)', backgroundColor: '#f8fafc', paddingBottom: '40px' }}>
-      {/* Disclaimer Banner */}
-      <div className="disclaimer-banner">
-        <AlertTriangle style={{ color: '#d97706', flexShrink: 0 }} size={20} />
-        <div style={{ fontSize: '13px', color: '#92400e' }}>
-          <strong>ข้อเสนอแนะเพื่อทบทวนโดย coder เท่านั้น — ต้องมีหลักฐานเวชระเบียนรองรับก่อนเปลี่ยนรหัส</strong>
-          <span style={{ marginLeft: '8px', color: '#b45309' }}>
-            (ระบบทำงานแบบ Read-Only ไม่มีการบันทึกหรือเปลี่ยนแปลงฐานข้อมูลโรงพยาบาลโดยอัตโนมัติ)
-          </span>
-        </div>
-      </div>
-
-      {/* Main Container */}
-      <div style={{ maxWidth: '1440px', margin: '0 auto', padding: '24px 20px' }}>
-        {onBackToWorklist && (
-          <div style={{ marginBottom: '16px' }}>
-            <button
-              type="button"
-              className="btn-modern btn-ghost-neutral"
-              onClick={onBackToWorklist}
-              style={{ padding: '7px 14px', fontSize: '13px' }}
-            >
-              <ArrowLeft size={16} /> กลับสู่ทะเบียนเคสผู้ป่วยใน (Worklist)
-            </button>
-          </div>
-        )}
-
-        {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '16px' }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <h2 style={{ fontSize: '22px', fontWeight: '800', margin: 0, color: '#0f172a' }}>
-                DRG Optimizer & Clinical Accuracy Audit
-              </h2>
-              <span style={{
-                backgroundColor: '#eff6ff',
-                color: '#2563eb',
-                fontSize: '11px',
-                fontWeight: '700',
-                padding: '2px 8px',
-                borderRadius: '6px',
-                border: '1px solid #bfdbfe',
-              }}>
-                v2.0 PRO
-              </span>
-            </div>
-            <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#64748b' }}>
-              วิเคราะห์ความถูกต้องของรหัสโรคตามเกณฑ์ สรท. และแนะนำรหัสโรคเพื่อ DRG / AdjRW ที่สะท้อนความรุนแรงจริง
-            </p>
-          </div>
-
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={{
-              padding: '6px 14px',
-              borderRadius: '20px',
-              fontSize: '12px',
-              fontWeight: '600',
-              backgroundColor: sessionStatus === 'connected' ? '#dcfce7' : '#f1f5f9',
-              color: sessionStatus === 'connected' ? '#166534' : '#64748b',
-              border: `1px solid ${sessionStatus === 'connected' ? '#bbf7d0' : '#e2e8f0'}`,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-            }}>
-              <span style={{
-                width: '7px',
-                height: '7px',
-                borderRadius: '50%',
-                backgroundColor: sessionStatus === 'connected' ? '#10b981' : '#94a3b8',
-              }} />
-              <Database size={14} />
-              {sessionStatus === 'connected' ? 'BMS เชื่อมต่อแล้ว' : 'ยังไม่ได้เชื่อมต่อ BMS'}
-            </span>
-
-            <span style={{
-              padding: '6px 14px',
-              borderRadius: '20px',
-              fontSize: '12px',
-              fontWeight: '600',
-              backgroundColor: '#f8fafc',
-              color: '#334155',
-              border: '1px solid #e2e8f0',
-            }}>
-              HCode: {hospitalCode} (รพ.กันทรลักษ์)
-            </span>
-          </div>
-        </div>
-
-        {/* Configuration & Search Bar */}
-        <div className="card-panel" style={{ padding: '20px', marginBottom: '24px' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px' }}>
-            <div>
-              <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '6px' }}>
-                เลขที่ผู้ป่วยใน (AN)
-              </label>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <input
-                  type="text"
-                  placeholder="ระบุเลข AN ที่ต้องการวิเคราะห์..."
-                  value={anInput}
-                  onChange={(e) => setAnInput(e.target.value)}
-                  style={{
-                    flex: 1,
-                    padding: '9px 14px',
-                    borderRadius: '8px',
-                    border: '1px solid #cbd5e1',
-                    fontSize: '14px',
-                    outline: 'none',
-                  }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleLoadAndOptimize(); }}
-                />
-                <button
-                  type="button"
-                  className="btn-modern btn-primary-gradient"
-                  onClick={() => handleLoadAndOptimize()}
-                  disabled={loading}
-                  style={{ padding: '9px 16px', whiteSpace: 'nowrap' }}
-                >
-                  <Search size={15} />
-                  {loading ? 'กำลังประมวลผล...' : 'โหลดเคสและวิเคราะห์'}
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '6px' }}>
-                BMS Session ID (ดึงจาก HOSxP/PasteJSON)
-              </label>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <input
-                  type="text"
-                  placeholder="ระบุ BMS Session ID..."
-                  value={bmsSessionId}
-                  onChange={(e) => setBmsSessionId(e.target.value)}
-                  style={{
-                    flex: 1,
-                    padding: '9px 14px',
-                    borderRadius: '8px',
-                    border: '1px solid #cbd5e1',
-                    fontSize: '13px',
-                    outline: 'none',
-                  }}
-                />
-                <button
-                  type="button"
-                  className="btn-modern btn-ghost-neutral"
-                  onClick={() => handleConnectSession(bmsSessionId)}
-                  style={{ padding: '9px 14px', whiteSpace: 'nowrap' }}
-                >
-                  เชื่อมต่อ
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '6px' }}>
-                อัตราฐานกลาง รพ. (บาท/AdjRW)
-              </label>
-              <input
-                type="number"
-                value={baseRate}
-                onChange={(e) => setBaseRate(Number(e.target.value) || 0)}
-                style={{
-                  width: '100%',
-                  padding: '9px 14px',
-                  borderRadius: '8px',
-                  border: '1px solid #cbd5e1',
-                  fontSize: '14px',
-                  outline: 'none',
-                }}
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Loading Step Progress */}
-        {loading && (
-          <div style={{
-            backgroundColor: '#eff6ff',
-            border: '1px solid #bfdbfe',
-            borderRadius: '12px',
-            padding: '16px 20px',
-            marginBottom: '24px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '12px',
-            boxShadow: '0 1px 3px rgba(37,99,235,0.08)',
-          }}>
-            <Activity style={{ animation: 'spin 1s linear infinite', color: '#2563eb', flexShrink: 0 }} size={20} />
-            <div style={{ fontSize: '14px', color: '#1e40af', fontWeight: '600' }}>
-              {loadingStep || 'กำลังประมวลผลการจำลอง DRG...'}
-            </div>
-          </div>
-        )}
-
-        {/* Error Alert */}
-        {error && (
-          <div style={{
-            backgroundColor: '#fef2f2',
-            border: '1px solid #fecaca',
-            borderRadius: '12px',
-            padding: '16px 20px',
-            marginBottom: '24px',
-            color: '#991b1b',
-            fontSize: '14px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '10px',
-          }}>
-            <AlertTriangle size={20} color="#dc2626" />
-            <span><strong>ข้อผิดพลาด:</strong> {error}</span>
-          </div>
-        )}
-
-        {/* Initial Empty Guide when no case loaded */}
-        {!currentCase && !loading && (
-          <div style={{
-            backgroundColor: '#ffffff',
-            borderRadius: '12px',
-            padding: '48px 24px',
-            textAlign: 'center',
-            border: '1px solid #e2e8f0',
-            marginBottom: '24px',
-          }}>
-            <div style={{
-              width: '60px',
-              height: '60px',
-              borderRadius: '50%',
-              backgroundColor: '#eff6ff',
-              color: '#2563eb',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              margin: '0 auto 16px auto',
-            }}>
-              <Search size={28} />
-            </div>
-            <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', fontWeight: '700', color: '#0f172a' }}>
-              พร้อมสำหรับการวิเคราะห์ DRG และตรวจสอบความถูกต้องทางคลินิก
-            </h3>
-            <p style={{ margin: '0 auto 20px auto', maxWidth: '520px', fontSize: '13px', color: '#64748b', lineHeight: '1.6' }}>
-              ระบุเลข AN ในช่องด้านบนเพื่อดึงข้อมูลจริงจากระบบ HIS หรือย้อนกลับไปเลือกเคสจากแท็บ
-              <strong> ทะเบียนเคสผู้ป่วยใน (Worklist)</strong>
-            </p>
-            {onBackToWorklist && (
-              <button
-                type="button"
-                className="btn-modern btn-primary-gradient"
-                onClick={onBackToWorklist}
-                style={{ padding: '8px 18px', fontSize: '13px' }}
-              >
-                ไปที่ทะเบียนเคสผู้ป่วยใน
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Patient Baseline Banner */}
-        {currentCase && (
-          <div className="card-panel" style={{ padding: '24px', marginBottom: '24px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px', borderBottom: '1px solid #f1f5f9', paddingBottom: '18px', marginBottom: '18px' }}>
-              <div>
-                <span style={{ fontSize: '11px', fontWeight: '800', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#2563eb', backgroundColor: '#eff6ff', padding: '3px 8px', borderRadius: '4px', border: '1px solid #bfdbfe' }}>
-                  ข้อมูลเคสปัจจุบัน (Baseline Case)
-                </span>
-                <h2 style={{ fontSize: '22px', fontWeight: '800', margin: '8px 0 4px 0', color: '#0f172a' }}>
-                  AN {currentCase.an} &bull; {currentCase.ptname || 'ไม่ระบุชื่อผู้ป่วย'}
-                </h2>
-                <div style={{ fontSize: '13px', color: '#64748b', display: 'flex', gap: '14px', flexWrap: 'wrap', marginTop: '6px' }}>
-                  <span><strong>HN:</strong> {currentCase.hn || '-'}</span>
-                  <span>&bull;</span>
-                  <span><strong>เพศ:</strong> {currentCase.sex || '-'}</span>
-                  <span>&bull;</span>
-                  <span><strong>อายุ:</strong> {currentCase.age ?? '-'} ปี</span>
-                  <span>&bull;</span>
-                  <span><strong>วันนอน (LOS):</strong> {currentCase.los ?? '-'} วัน</span>
-                  <span>&bull;</span>
-                  <span><strong>จำหน่าย:</strong> DC {currentCase.dchtype ?? '1'}{currentCase.dchstts ?? '1'}</span>
-                  <span>&bull;</span>
-                  <span><strong>ยา/เวชภัณฑ์:</strong> {usageItems.length} รายการ</span>
-                </div>
-              </div>
-
-              {baseline && (
-                <div style={{ textAlign: 'right', backgroundColor: '#f8fafc', padding: '14px 20px', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
-                  <div style={{ fontSize: '11px', color: '#64748b', fontWeight: '700', textTransform: 'uppercase' }}>Baseline DRG ทางการ</div>
-                  <div style={{ fontSize: '26px', fontWeight: '800', color: '#0f172a', letterSpacing: '0.02em' }}>
-                    {baseline.drg || '-'}
-                  </div>
-                  <div style={{ fontSize: '14px', color: '#059669', fontWeight: '800' }}>
-                    AdjRW: {baseline.adjrw != null ? baseline.adjrw.toFixed(4) : '-'}
-                  </div>
-                  <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>
-                    ~{baseline.adjrw != null ? (baseline.adjrw * baseRate).toLocaleString('th-TH', { maximumFractionDigits: 0 }) : '-'} บาท
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Existing Codes Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-              <div style={{ backgroundColor: '#f8fafc', padding: '16px', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
-                <div style={{ fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '8px' }}>วินิจฉัยหลักเดิม (Primary Diagnosis)</div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span className="chip-code chip-pdx" style={{ fontSize: '16px', padding: '4px 12px' }}>
-                    {currentCase.pdx || 'ยังไม่ลงรหัส'}
-                  </span>
-                </div>
-              </div>
-
-              <div style={{ backgroundColor: '#f8fafc', padding: '16px', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
-                <div style={{ fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '8px' }}>วินิจฉัยร่วมเดิม (Secondary Diagnoses)</div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                  {[currentCase.sdx1, currentCase.sdx2, currentCase.sdx3, currentCase.sdx4].filter(Boolean).length > 0 ? (
-                    [currentCase.sdx1, currentCase.sdx2, currentCase.sdx3, currentCase.sdx4].filter(Boolean).map((s, idx) => (
-                      <span key={idx} className="chip-code chip-sdx" style={{ fontSize: '13px', padding: '3px 9px' }}>
-                        {s}
-                      </span>
-                    ))
-                  ) : (
-                    <span style={{ fontSize: '13px', color: '#94a3b8' }}>ไม่มี SDx เดิม</span>
-                  )}
-                </div>
-              </div>
-
-              <div style={{ backgroundColor: '#f8fafc', padding: '16px', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
-                <div style={{ fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '8px' }}>หัตถการเดิม (Procedures)</div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                  {[currentCase.proc1, currentCase.proc2, currentCase.proc3].filter(Boolean).length > 0 ? (
-                    [currentCase.proc1, currentCase.proc2, currentCase.proc3].filter(Boolean).map((p, idx) => (
-                      <span key={idx} className="chip-code" style={{ fontSize: '13px', padding: '3px 9px', backgroundColor: '#ffffff', color: '#334155', border: '1px solid #cbd5e1' }}>
-                        {p}
-                      </span>
-                    ))
-                  ) : (
-                    <span style={{ fontSize: '13px', color: '#94a3b8' }}>ไม่มีหัตถการ</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Clinical Audit Panel Component */}
-        {auditResult && (
-          <div style={{ marginBottom: '24px' }}>
-            <ClinicalAuditPanel
-              audit={auditResult}
-              onApplyCode={handleApplyCodeFromAudit}
-            />
-          </div>
-        )}
-
-        {/* Hero Comparison Card (Before vs After) */}
-        {baseline && topSuggestion && (
-          <div className="comparison-hero-card">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
-              <TrendingUp size={20} color="#10b981" />
-              <h3 style={{ fontSize: '17px', fontWeight: '800', margin: 0, color: '#0f172a' }}>
-                ผลลัพธ์การจำลองที่ดีที่สุด (Top Recommended Optimization)
-              </h3>
-            </div>
-
-            <div className="comparison-grid">
-              {/* Left: Baseline */}
-              <div className="comparison-box box-baseline">
-                <span style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase' }}>
-                  รหัสปัจจุบัน (Before)
-                </span>
-                <div style={{ fontSize: '26px', fontWeight: '800', color: '#0f172a', margin: '6px 0 2px 0' }}>
-                  DRG {baseline.drg || '-'}
-                </div>
-                <div style={{ fontSize: '14px', fontWeight: '700', color: '#475569' }}>
-                  AdjRW: {baseline.adjrw != null ? baseline.adjrw.toFixed(4) : '-'}
-                </div>
-                <div style={{ fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
-                  ~{baseline.adjrw != null ? (baseline.adjrw * baseRate).toLocaleString('th-TH', { maximumFractionDigits: 0 }) : '-'} บาท
-                </div>
-                <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid #e2e8f0', fontSize: '12px', color: '#475569' }}>
-                  {`วินิจฉัยเดิม (Primary): ${currentCase?.pdx || '-'}`}
-                </div>
-              </div>
-
-              {/* Center: Gain Pill & Arrow */}
-              <div className="comparison-arrow">
-                <div className="delta-gain-pill">
-                  <Sparkles size={16} />
-                  +{topSuggestion.delta != null ? topSuggestion.delta.toFixed(4) : '-'} AdjRW
-                </div>
-                <div style={{ margin: '8px 0' }}>
-                  <ArrowRight size={28} color="#10b981" />
-                </div>
-                <div style={{ fontSize: '13px', fontWeight: '800', color: '#059669' }}>
-                  +{(topSuggestion.delta != null ? topSuggestion.delta * baseRate : 0).toLocaleString('th-TH', { maximumFractionDigits: 0 })} บาท
-                </div>
-              </div>
-
-              {/* Right: Top Suggestion */}
-              <div className="comparison-box box-optimized">
-                <span style={{ fontSize: '11px', fontWeight: '700', color: '#059669', textTransform: 'uppercase' }}>
-                  รหัสแนะนำปรับปรุง (After)
-                </span>
-                <div style={{ fontSize: '26px', fontWeight: '800', color: '#047857', margin: '6px 0 2px 0' }}>
-                  DRG {topSuggestion.drg}
-                </div>
-                <div style={{ fontSize: '14px', fontWeight: '800', color: '#059669' }}>
-                  AdjRW: {topSuggestion.adjrw != null ? topSuggestion.adjrw.toFixed(4) : '-'}
-                </div>
-                <div style={{ fontSize: '12px', color: '#047857', marginTop: '2px' }}>
-                  ~{topSuggestion.adjrw != null ? (topSuggestion.adjrw * baseRate).toLocaleString('th-TH', { maximumFractionDigits: 0 }) : '-'} บาท
-                </div>
-                <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid #bbf7d0', fontSize: '12px', color: '#047857' }}>
-                  {`วินิจฉัยแนะนำ (Optimized): ${topSuggestion.pdx}${topSuggestion.sdx.length > 0 ? ` (SDx: ${topSuggestion.sdx.join(', ')})` : ''}`}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Evidence Candidates Panel */}
-        {currentCase && (
-          <div className="workbench-panel">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
-              <div>
-                <h3 style={{ fontSize: '16px', fontWeight: '800', margin: 0, color: '#0f172a' }}>
-                  รหัสโรคที่พบหลักฐานในระบบการใช้ยา / เวชระเบียน ({candidates.length} รหัส)
-                </h3>
-                <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#64748b' }}>
-                  สกัดอัตโนมัติจากใบสั่งยา (presc_reason) และเหตุผลการสั่งยาจำเป็น (need_order_reason)
-                </p>
-              </div>
-
-              {/* Add Manual Candidate */}
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <input
-                  type="text"
-                  placeholder="เพิ่มรหัส ICD-10 เอง..."
-                  value={manualCode}
-                  onChange={(e) => setManualCode(e.target.value)}
-                  style={{
-                    padding: '7px 12px',
-                    borderRadius: '8px',
-                    border: '1px solid #cbd5e1',
-                    fontSize: '13px',
-                    width: '160px',
-                    outline: 'none',
-                  }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddManualCandidate(); }}
-                />
-                <button
-                  type="button"
-                  className="btn-modern btn-success-gradient"
-                  onClick={handleAddManualCandidate}
-                  style={{ padding: '7px 14px', fontSize: '12px' }}
-                >
-                  <PlusCircle size={15} />
-                  เพิ่มรหัส
-                </button>
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
-              {candidates.length > 0 ? (
-                candidates.map((c) => {
-                  const isCurrentPdx = c.code === currentCase?.pdx;
-                  const isCurrentSdx = [currentCase?.sdx1, currentCase?.sdx2, currentCase?.sdx3, currentCase?.sdx4].includes(c.code);
-
-                  return (
-                    <div
-                      key={c.code}
-                      style={{
-                        padding: '8px 12px',
-                        borderRadius: '8px',
-                        border: '1px solid #cbd5e1',
-                        backgroundColor: isCurrentPdx ? '#eff6ff' : isCurrentSdx ? '#ecfdf5' : '#ffffff',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
-                      }}
-                    >
-                      <span style={{ fontWeight: '800', color: '#0f172a', fontSize: '14px' }}>
-                        {c.code}
-                      </span>
-                      {isCurrentPdx && (
-                        <span style={{ fontSize: '10px', backgroundColor: '#bfdbfe', color: '#1e40af', padding: '1px 5px', borderRadius: '4px', fontWeight: '700' }}>
-                          PDx เดิม
-                        </span>
-                      )}
-                      {isCurrentSdx && (
-                        <span style={{ fontSize: '10px', backgroundColor: '#a7f3d0', color: '#065f46', padding: '1px 5px', borderRadius: '4px', fontWeight: '700' }}>
-                          SDx เดิม
-                        </span>
-                      )}
-                      {!isCurrentPdx && !isCurrentSdx && (
-                        <span style={{ fontSize: '10px', backgroundColor: '#fef3c7', color: '#92400e', padding: '1px 5px', borderRadius: '4px', fontWeight: '700' }}>
-                          พบหลักฐาน
-                        </span>
-                      )}
-                    </div>
-                  );
-                })
-              ) : (
-                <div style={{ fontSize: '13px', color: '#94a3b8' }}>
-                  ไม่พบรหัสโรคในรายการสั่งใช้ยา สามารถกรอกรหัส ICD-10 เองได้ที่ช่องด้านบน
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Ranked Suggestions Table */}
-        {currentCase && suggestions.length > 0 && (
-          <div className="workbench-panel">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
-              <div>
-                <h3 style={{ fontSize: '16px', fontWeight: '800', margin: 0, color: '#0f172a' }}>
-                  อันดับผลการจำลองจัดกลุ่ม DRG ที่สูงขึ้น ({suggestions.length} รูปแบบ)
-                </h3>
-                <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#64748b' }}>
-                  เรียงตามผลต่างค่าน้ำหนักสัมพัทธ์ (Delta AdjRW) จากมากไปหาน้อย
-                </p>
-              </div>
-            </div>
-
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
-                <thead>
-                  <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569', fontWeight: '700' }}>
-                    <th style={{ padding: '12px 14px' }}>อันดับ</th>
-                    <th style={{ padding: '12px 14px' }}>การปรับเปลี่ยน</th>
-                    <th style={{ padding: '12px 14px' }}>PDx แนะนำ</th>
-                    <th style={{ padding: '12px 14px' }}>SDx ทั้งหมด</th>
-                    <th style={{ padding: '12px 14px' }}>DRG ใหม่</th>
-                    <th style={{ padding: '12px 14px' }}>AdjRW</th>
-                    <th style={{ padding: '12px 14px' }}>ส่วนต่าง (Delta)</th>
-                    <th style={{ padding: '12px 14px' }}>ผลกระทบรายได้</th>
-                    <th style={{ padding: '12px 14px' }}>หลักฐานประกอบ</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {suggestions.map((s, idx) => {
-                    const gain = s.delta != null && s.delta > 0;
-                    const evidenceKey = `sugg-${idx}`;
-                    const hasEvidence = s.evidence && s.evidence.length > 0;
-
-                    return (
-                      <React.Fragment key={idx}>
-                        <tr
-                          style={{
-                            borderBottom: '1px solid #f1f5f9',
-                            backgroundColor: idx === 0 ? '#f0fdf4' : '#ffffff',
-                            fontWeight: idx === 0 ? '600' : 'normal',
-                          }}
-                        >
-                          <td style={{ padding: '12px 14px' }}>
-                            <span style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              width: '22px',
-                              height: '22px',
-                              borderRadius: '50%',
-                              backgroundColor: idx === 0 ? '#10b981' : '#e2e8f0',
-                              color: idx === 0 ? '#ffffff' : '#475569',
-                              fontSize: '11px',
-                              fontWeight: '800',
-                            }}>
-                              {idx + 1}
-                            </span>
-                          </td>
-                          <td style={{ padding: '12px 14px' }}>
-                            <span style={{
-                              fontSize: '11px',
-                              padding: '2px 8px',
-                              borderRadius: '4px',
-                              fontWeight: '700',
-                              backgroundColor: s.kind === 'add_sdx' ? '#eff6ff' : '#fef3c7',
-                              color: s.kind === 'add_sdx' ? '#1d4ed8' : '#b45309',
-                            }}>
-                              {s.kind === 'add_sdx' ? '+ เพิ่ม SDx' : '⇄ สลับ PDx'}
-                            </span>
-                          </td>
-                          <td style={{ padding: '12px 14px' }}>
-                            <span className="chip-code chip-pdx" style={{ fontSize: '13px' }}>
-                              {s.pdx}
-                            </span>
-                          </td>
-                          <td style={{ padding: '12px 14px' }}>
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', maxWidth: '320px' }}>
-                              {s.sdx.map((code, sIdx) => (
-                                <span key={sIdx} className="chip-code chip-sdx" style={{ fontSize: '11px', padding: '1px 6px' }}>
-                                  {code}
-                                </span>
-                              ))}
-                            </div>
-                          </td>
-                          <td style={{ padding: '12px 14px', fontWeight: '800', color: '#0f172a' }}>
-                            {s.drg}
-                          </td>
-                          <td style={{ padding: '12px 14px', fontWeight: '700', color: '#059669' }}>
-                            {s.adjrw != null ? s.adjrw.toFixed(4) : '-'}
-                          </td>
-                          <td style={{ padding: '12px 14px' }}>
-                            <span style={{
-                              fontWeight: '800',
-                              color: gain ? '#16a34a' : '#64748b',
-                              fontSize: '13px',
-                            }}>
-                              {s.delta != null ? `${s.delta >= 0 ? '+' : ''}${s.delta.toFixed(4)}` : '-'}
-                            </span>
-                          </td>
-                          <td style={{ padding: '12px 14px', fontWeight: '700', color: gain ? '#047857' : '#64748b' }}>
-                            {s.delta != null ? `+${(s.delta * baseRate).toLocaleString('th-TH', { maximumFractionDigits: 0 })} ฿` : '-'}
-                          </td>
-                          <td style={{ padding: '12px 14px' }}>
-                            {hasEvidence ? (
-                              <button
-                                type="button"
-                                onClick={() => toggleEvidence(evidenceKey)}
-                                style={{
-                                  background: 'none',
-                                  border: 'none',
-                                  color: '#2563eb',
-                                  fontSize: '12px',
-                                  fontWeight: '600',
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                }}
-                              >
-                                {expandedEvidence[evidenceKey] ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                                {s.evidence!.length} รายการ
-                              </button>
-                            ) : (
-                              <span style={{ fontSize: '11px', color: '#94a3b8' }}>-</span>
-                            )}
-                          </td>
-                        </tr>
-
-                        {/* Expandable Evidence Sub-row */}
-                        {hasEvidence && expandedEvidence[evidenceKey] && (
-                          <tr style={{ backgroundColor: '#f8fafc' }}>
-                            <td colSpan={9} style={{ padding: '10px 20px', borderBottom: '1px solid #e2e8f0' }}>
-                              <div style={{ fontSize: '12px', color: '#475569', lineHeight: '1.6' }}>
-                                <strong>หลักฐานในระบบการใช้ยา:</strong>
-                                <ul style={{ margin: '4px 0 0 0', paddingLeft: '20px' }}>
-                                  {s.evidence!.map((ev, eIdx) => (
-                                    <li key={eIdx}>{ev}</li>
-                                  ))}
-                                </ul>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
+  return <div className="page-stack optimizer-page">
+    <section className="page-intro optimizer-intro"><div><span className="eyebrow">DRG REVIEW WORKBENCH</span><h2>วิเคราะห์เคสจากหลักฐาน</h2><p>ข้อเสนอแนะเพื่อทบทวนโดย Coder เท่านั้น · ระบบไม่เขียนข้อมูลกลับ HIS</p></div><button className="button button-quiet" type="button" onClick={onBackToWorklist}><ArrowLeft size={16} />กลับทะเบียนเคส</button></section>
+    {externalStatus !== 'connected' && !isDemo && <ConnectionPrompt status={externalStatus} onConnect={onConnectSession} />}
+    <section className="case-search-panel"><div className="search-field large"><Search size={18} /><label className="sr-only" htmlFor="an-search">เลข AN</label><input id="an-search" value={anInput} onChange={(event) => setAnInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void handleLoadAndOptimize(); }} placeholder="ค้นหา AN เพื่อเริ่มวิเคราะห์" inputMode="numeric" /><button className="button button-primary" type="button" onClick={() => void handleLoadAndOptimize()} disabled={loading || !anInput.trim()}>{loading ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />} {loading ? 'กำลังวิเคราะห์' : 'โหลดเคส'}</button>{loading && <button className="button button-danger-quiet" type="button" onClick={stopAnalysis}><CircleStop size={16} />ยกเลิก</button>}</div>{error && <div className="inline-error" role="alert"><AlertTriangle size={17} /><span>{error}</span>{anInput.trim() && <button className="button button-secondary button-small" type="button" onClick={() => void handleLoadAndOptimize()}>ลองใหม่</button>}<button className="icon-button" type="button" onClick={() => setError(null)} aria-label="ปิดข้อความผิดพลาด"><X size={15} /></button></div>}</section>
+    {loading && <section className="analysis-progress"><div className="progress-orbit"><LoaderCircle className="spin" size={24} /></div><div><strong>{loadingStep}</strong><span>{progress ? `ประมวลผล Grouper ${progress.completed}/${progress.total}` : 'กรุณารอสักครู่ ระบบกำลังตรวจสอบข้อมูลตามลำดับ'}</span></div></section>}
+    {!loading && cancelled && <div className="inline-warning" role="status"><CircleStop size={17} />ยกเลิกการคำนวณแล้ว — ผลลัพธ์ที่แสดงเป็นเพียงบางส่วน</div>}
+    {!loading && !currentCase && !error && <div className="empty-state large"><Sparkles size={30} /><strong>เลือกเคสเพื่อเริ่มการวิเคราะห์</strong><span>ระบุ AN จากทะเบียนเคส แล้วระบบจะดึงข้อมูลจริงและแสดงคำแนะนำที่มีหลักฐานกำกับ</span></div>}
+    {currentCase && <>
+      <section className="case-identity-panel"><div className="identity-main"><span className="eyebrow">CASE {currentCase.an}</span><h3>{currentCase.ptname || 'ไม่ระบุชื่อผู้ป่วย'}</h3><div className="identity-meta"><span>HN {currentCase.hn || '—'}</span><span>{currentCase.sex || '—'} · {currentCase.age ?? '—'} ปี</span><span>LOS {currentCase.los ?? '—'} วัน</span><span>{currentCase.firstWardName || currentCase.firstWard || 'ไม่ระบุหอผู้ป่วย'}</span></div></div><div className="identity-drg"><span>DRG จาก HIS</span><strong>{currentCase.drg || '—'}</strong><small>AdjRW {currentCase.adjrw != null ? Number(currentCase.adjrw).toFixed(4) : '—'}</small></div></section>
+      <section className="code-overview"><CodeSet title="PDx · วินิจฉัยหลัก" codes={currentCase.pdx ? [currentCase.pdx] : []} tone="pdx" /><CodeSet title={`SDx · วินิจฉัยร่วม (${sdx.length}/12)`} codes={sdx} tone="sdx" /><CodeSet title={`Procedure · หัตถการ (${proc.length}/30)`} codes={proc} tone="proc" /></section>
+      <section className="analysis-grid"><div className="analysis-main"><div className="section-heading"><div><span className="eyebrow">GROUPER COMPARISON</span><h3>Baseline และโอกาสปรับปรุง</h3></div><span className="source-badge"><CheckCircle2 size={14} />MOPH V6</span></div><div className="compare-grid"><article className="compare-card"><span className="compare-label">Baseline จาก Grouper</span><strong>{baseline?.drg || currentCase.drg || 'ยังไม่ได้คำนวณ'}</strong><span>AdjRW {baseline?.adjrw != null ? baseline.adjrw.toFixed(4) : currentCase.adjrw != null ? Number(currentCase.adjrw).toFixed(4) : '—'}</span><small>{baseline?.wtlos != null ? `WtLOS ${baseline.wtlos.toFixed(2)} · OT ${baseline.ot ?? '—'}` : 'ข้อมูลจากเคสปัจจุบัน'}</small>{baseline?.error && <span className="grouper-error" role="alert">Grouper error: {baseline.error}</span>}{baseline?.warning && <span className="grouper-warning">Grouper warning: {baseline.warning}</span>}</article><article className="compare-card compare-opportunity"><span className="compare-label">คำแนะนำที่มี delta สูงสุด</span><strong>{suggestions[0]?.drg || '—'}</strong><span>{suggestions[0]?.delta != null ? `+${suggestions[0].delta.toFixed(4)} AdjRW` : 'ยังไม่มีคำแนะนำที่ผ่านเกณฑ์'}</span><small>{suggestions.length ? `${suggestions.length} ทางเลือกที่มีผลบวก` : 'ต้องมี evidence และผล Grouper ที่สูงขึ้น'}</small></article></div><div className="suggestion-header"><div><h3>คำแนะนำจาก Candidate</h3><p>ระบบจะแสดงเฉพาะ permutation ที่ AdjRW เพิ่มขึ้นและมีหลักฐานประกอบ</p></div><div className="manual-candidate"><input value={manualCode} onChange={(event) => setManualCode(event.target.value)} placeholder="เพิ่ม ICD เช่น N184" aria-label="เพิ่ม ICD candidate" /><button className="button button-secondary button-small" type="button" onClick={() => void addManualCandidate()} disabled={loading}><Plus size={14} />เพิ่ม</button></div></div>{suggestions.length > 0 ? <div className="suggestion-list">{suggestions.map((item, index) => <SuggestionCard suggestion={item} index={index} key={`${item.kind}-${item.pdx}-${index}`} />)}</div> : <div className="empty-inline"><CheckCircle2 size={18} />ยังไม่พบคำแนะนำที่ทำให้ AdjRW เพิ่มขึ้นจากหลักฐานที่มี</div>}{failures.length > 0 && <details className="failure-disclosure"><summary><AlertTriangle size={15} /> {failures.length} candidate คำนวณไม่สำเร็จ</summary><ul>{failures.map((item, index) => <li key={`${item.code}-${index}`}>{item.code} · {item.message}</li>)}</ul></details>}</div><aside className="analysis-side"><div className="section-heading"><div><span className="eyebrow">EVIDENCE</span><h3>Usage ที่ใช้ประกอบ</h3></div><span className="count-badge">{usageItems.length}</span></div><UsageEvidence items={usageItems} /><div className="candidate-summary"><span className="field-label">Candidates ที่พบ</span><div className="code-list">{candidates.length ? candidates.map((item) => <span className="code-pill code-sdx" key={item.code}>{item.code}</span>) : <span className="muted">ยังไม่พบ code จาก usage</span>}</div></div></aside></section>
+      {auditResult && <ClinicalAuditPanel audit={auditResult} onApplyCode={(code) => void handleLoadAndOptimize(currentCase.an, code)} />}
+    </>}
+    {!loading && currentCase && <div className="optimizer-footnote"><Clock3 size={15} />ผลการวิเคราะห์เป็น snapshot ของข้อมูล ณ เวลาที่โหลด · หากมีการแก้ไขข้อมูลใน HIS ให้โหลดเคสใหม่อีกครั้ง</div>}
+  </div>;
+}

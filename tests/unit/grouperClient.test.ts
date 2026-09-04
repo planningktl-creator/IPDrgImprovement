@@ -113,6 +113,13 @@ describe('buildDrgPayload', () => {
       }),
     ).toThrow(/ค่าตัวเลขของเคสอยู่นอกช่วงที่รองรับ/);
   });
+
+  it('rejects non-numeric procedure codes', () => {
+    expect(() => buildDrgPayload({
+      hcode: '10929', sex: 1, age: 60, ageDay: 0, weight: 0, losDay: 5, losHour: 0,
+      dcCode: '11', pdx: 'J189', sdx: [], proc: ['ABCD'],
+    })).toThrow(/Procedure/);
+  });
 });
 
 describe('calculateDrg', () => {
@@ -206,5 +213,21 @@ describe('calculateDrg', () => {
     await expect(calculateDrg({ version: '6', data: [] })).rejects.toThrow(
       /Grouper ไม่ส่งผลลัพธ์ DRG กลับมา/,
     );
+  });
+
+  it('rejects invalid JSON and malformed numeric fields instead of creating a result', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => ({ status: 200, data: [{ drg: '04010', rw: 'not-a-number', adjrw: 1.2 }] }),
+    });
+    await expect(calculateDrg({ version: '6', data: [] })).rejects.toThrow(/ค่า rw ไม่ถูกต้อง/);
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => { throw new Error('bad json'); },
+    });
+    await expect(calculateDrg({ version: '6', data: [] })).rejects.toThrow(/JSON/);
   });
 });

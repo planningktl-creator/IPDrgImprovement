@@ -9,9 +9,11 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:browser": "python scripts/browser-smoke.py",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
-    "test:component": "vitest run tests/component"
+    "test:component": "vitest run tests/component",
+    "check:static": "node scripts/check-static.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",
@@ -19,7 +21,8 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-router-dom": "^7.13.2",
-    "tailwind-merge": "^3.5.0"
+    "tailwind-merge": "^3.5.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

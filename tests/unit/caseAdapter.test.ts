@@ -162,4 +162,19 @@ describe('cmiCaseToDrgInput', () => {
     expect(input.proc).toHaveLength(5);
     expect(input.proc).toContain('8952');
   });
+
+  it('keeps all 30 procedures and rejects invalid codes or unknown sex', () => {
+    const row: CmiCaseRow = {
+      pdx: 'I210',
+      sex: 'ชาย',
+      age: 72,
+      los: 6,
+      dchtype: '1',
+      dchstts: '1',
+      proc: Array.from({ length: 30 }, (_, index) => String(1000 + index)),
+    };
+    expect(cmiCaseToDrgInput(row, { hcode: '10929' }).proc).toHaveLength(30);
+    expect(() => cmiCaseToDrgInput({ ...row, proc: ['ABCD'] }, { hcode: '10929' })).toThrow(/Procedure/);
+    expect(() => cmiCaseToDrgInput({ ...row, sex: 'ไม่ทราบ' }, { hcode: '10929' })).toThrow(/เพศ/);
+  });
 });

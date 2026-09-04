@@ -24,6 +24,23 @@ export interface BaselineResult {
   adjrw: number | null;
   rw?: number;
   mdc?: string;
+  wtlos?: number;
+  ot?: number;
+  error?: string;
+  warning?: string;
+}
+
+export interface SuggestFailure {
+  kind: Suggestion['kind'];
+  code: string;
+  message: string;
+}
+
+export interface SuggestProgress {
+  completed: number;
+  total: number;
+  phase: 'baseline' | 'candidate' | 'complete';
+  label?: string;
 }
 
 export type CandidateInput =
@@ -38,11 +55,14 @@ export interface SuggestOptions {
   concurrency?: number;
   signal?: AbortSignal;
   maxCandidates?: number;
+  onProgress?: (progress: SuggestProgress) => void;
 }
 
 export interface SuggestResult {
   baseline: BaselineResult;
   suggestions: Suggestion[];
+  failures: SuggestFailure[];
+  cancelled: boolean;
 }
 
 /**
@@ -54,6 +74,7 @@ export async function suggestHigherDrg(
   candidates: CandidateInput[],
   opts: SuggestOptions = {},
 ): Promise<SuggestResult> {
+  opts.onProgress?.({ completed: 0, total: 1, phase: 'baseline', label: 'กำลังคำนวณ Baseline DRG' });
   const bJson = await calculateDrg(buildDrgPayload(base), opts.signal);
   const b = bJson.data[0];
   const baseAdj = typeof b.adjrw === 'number' ? b.adjrw : null;
@@ -63,6 +84,10 @@ export async function suggestHigherDrg(
     adjrw: baseAdj,
     rw: typeof b.rw === 'number' ? b.rw : undefined,
     mdc: b.mdc ? String(b.mdc) : undefined,
+    wtlos: typeof b.wtlos === 'number' ? b.wtlos : undefined,
+    ot: typeof b.ot === 'number' ? b.ot : undefined,
+    error: b.err ? String(b.err) : undefined,
+    warning: b.warn ? String(b.warn) : undefined,
   };
 
   // Normalize candidate list
@@ -79,7 +104,9 @@ export async function suggestHigherDrg(
     }
   }
 
-  const maxCandidates = opts.maxCandidates ?? 20;
+  const requestedMaxCandidates = opts.maxCandidates ?? 20;
+  if (!Number.isFinite(requestedMaxCandidates) || requestedMaxCandidates < 1) throw new Error('จำนวน candidate ต้องมากกว่า 0');
+  const maxCandidates = Math.min(30, Math.trunc(requestedMaxCandidates));
   const targetCandidates = [...candidateMap.values()].slice(0, maxCandidates);
 
   interface MutationItem {
@@ -129,10 +156,17 @@ export async function suggestHigherDrg(
   }
 
   const out: Suggestion[] = [];
+  const failures: SuggestFailure[] = [];
+  const total = queue.length;
+  let completed = 0;
+  let cancelled = false;
 
   // Sequential execution to respect MOPH Grouper API rate limits
   for (const q of queue) {
-    if (opts.signal?.aborted) break;
+    if (opts.signal?.aborted) {
+      cancelled = true;
+      break;
+    }
 
     try {
       const j = await calculateDrg(
@@ -168,8 +202,15 @@ export async function suggestHigherDrg(
         mdc: r.mdc ? String(r.mdc) : undefined,
         warning: warningParts.length > 0 ? warningParts.join(' ') : undefined,
       });
-    } catch {
-      // Ignore rejected combinations and proceed to next candidate
+    } catch (error) {
+      if (opts.signal?.aborted) {
+        cancelled = true;
+        break;
+      }
+      failures.push({ kind: q.kind, code: q.pdx, message: error instanceof Error ? error.message : 'Grouper calculation failed' });
+    } finally {
+      completed += 1;
+      opts.onProgress?.({ completed, total, phase: 'candidate', label: `${completed}/${total} candidate` });
     }
   }
 
@@ -177,8 +218,12 @@ export async function suggestHigherDrg(
     .filter((s) => s.delta != null && s.delta > 0)
     .sort((x, y) => (y.delta ?? 0) - (x.delta ?? 0));
 
+  cancelled = cancelled || Boolean(opts.signal?.aborted);
+  opts.onProgress?.({ completed, total, phase: 'complete', label: cancelled ? 'ยกเลิกการคำนวณแล้ว' : 'คำนวณเสร็จแล้ว' });
   return {
     baseline,
     suggestions: positiveSuggestions,
+    failures,
+    cancelled,
   };
 }
