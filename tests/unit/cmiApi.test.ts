@@ -16,6 +16,7 @@ import {
   validateWorklistQuery,
   retrieveBmsSession,
   extractConnectionConfig,
+  isBmsSessionFailure,
 } from '@/services/cmiApi';
 
 describe('cmiApi read-only guards', () => {
@@ -233,3 +234,73 @@ describe('Session Persistence Utilities', () => {
     expect(getStoredBmsSessionId()).toBe('');
   });
 });
+
+describe('SQL Query Parameter Compatibility and 409 Error Handling', () => {
+  it('ensures CASE_WORKLIST_SQL uses CAST(:dstart AS date) and does not contain DATE :', () => {
+    expect(CASE_WORKLIST_SQL).toContain('CAST(:dstart AS date)');
+    expect(CASE_WORKLIST_SQL).toContain('CAST(:dend AS date)');
+    expect(CASE_WORKLIST_SQL).not.toMatch(/DATE\s+:[a-zA-Z0-9_]+/i);
+  });
+
+  it('uses NULLIF for cursor_date to prevent timestamp syntax error on empty cursor', () => {
+    expect(CASE_WORKLIST_SQL).toContain("NULLIF(:cursor_date, '') IS NULL");
+    expect(CASE_WORKLIST_SQL).toContain("CAST(NULLIF(:cursor_date, '') AS timestamp)");
+  });
+
+  it('ensures CASE_DETAIL_SQL binds :an in target_case and uses subqueries for dependent CTEs', () => {
+    expect(CASE_DETAIL_SQL).toContain('WHERE i.an = :an');
+    expect(CASE_DETAIL_SQL).toContain('WHERE an IN (SELECT an FROM target_case)');
+    const countAn = (CASE_DETAIL_SQL.match(/:an\b/g) || []).length;
+    expect(countAn).toBe(1);
+  });
+
+  it('preserves database error message on 409 and does not trigger isBmsSessionFailure', async () => {
+    const config = { apiUrl: 'https://bms.test', databaseType: 'postgresql' as const, databaseSupportStatus: 'supported' as const, appIdentifier: 'test' };
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        result: {},
+        MessageCode: 409,
+        Message: 'Database error: syntax error at or near "$1"',
+      }),
+    });
+
+    let caughtError: unknown;
+    try {
+      await executeSqlViaApi(CASE_WORKLIST_SQL, config);
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(Error);
+    expect((caughtError as Error).message).toContain('Database error: syntax error at or near "$1"');
+    expect((caughtError as Error).message).toContain('409');
+    // 409 is a database query syntax/conflict error, not an auth session expiration
+    expect(isBmsSessionFailure(caughtError)).toBe(false);
+  });
+
+  it('identifies 401 and 403 as session failures in isBmsSessionFailure', async () => {
+    const config = { apiUrl: 'https://bms.test', databaseType: 'postgresql' as const, databaseSupportStatus: 'supported' as const, appIdentifier: 'test' };
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        result: {},
+        MessageCode: 401,
+        Message: 'Session expired',
+      }),
+    });
+
+    let caughtError: unknown;
+    try {
+      await executeSqlViaApi(CASE_WORKLIST_SQL, config);
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(Error);
+    expect(isBmsSessionFailure(caughtError)).toBe(true);
+  });
+});
+

@@ -115,8 +115,8 @@ const MASKED_PATIENT_FIELDS = `
 
 const WORKLIST_CTES = `WITH params AS (
   SELECT
-    DATE :dstart AS dstart,
-    DATE :dend AS dend
+    CAST(:dstart AS date) AS dstart,
+    CAST(:dend AS date) AS dend
 ),
 target_cases AS (
   SELECT DISTINCT ON (i.an)
@@ -241,9 +241,9 @@ export const CASE_WORKLIST_SQL = `${WORKLIST_CTES}
 SELECT *
 FROM filtered_cases
 WHERE (
-  :cursor_date = ''
-  OR dchdate < CAST(:cursor_date AS timestamp)
-  OR (dchdate = CAST(:cursor_date AS timestamp) AND an > :cursor_an)
+  NULLIF(:cursor_date, '') IS NULL
+  OR dchdate < CAST(NULLIF(:cursor_date, '') AS timestamp)
+  OR (dchdate = CAST(NULLIF(:cursor_date, '') AS timestamp) AND an > :cursor_an)
 )
 ORDER BY dchdate DESC NULLS LAST, an ASC
 LIMIT (:page_limit + 1);`;
@@ -270,19 +270,29 @@ export const CASE_DETAIL_SQL = `WITH target_case AS (
   ORDER BY i.an, i.dchdate DESC NULLS LAST, i.regdate DESC NULLS LAST
 ),
 pdx_per_an AS (
-  SELECT an, MAX(icd10) FILTER (WHERE diagtype = '1') AS pdx
-  FROM iptdiag WHERE an = :an GROUP BY an
+  SELECT
+    an,
+    MAX(CASE WHEN diagtype = '1' THEN icd10 END) AS pdx
+  FROM iptdiag
+  WHERE an IN (SELECT an FROM target_case)
+  GROUP BY an
 ),
 diagnosis_per_an AS (
-  SELECT an,
+  SELECT
+    an,
 ${SdxSelectDetail},
     MAX(CASE WHEN diagtype = '3' THEN icd10 END) AS ext_cause
-  FROM iptdiag WHERE an = :an GROUP BY an
+  FROM iptdiag
+  WHERE an IN (SELECT an FROM target_case)
+  GROUP BY an
 ),
 procedure_per_an AS (
-  SELECT an,
+  SELECT
+    an,
 ${ProcSelectDetail}
-  FROM iptoprt WHERE an = :an GROUP BY an
+  FROM iptoprt
+  WHERE an IN (SELECT an FROM target_case)
+  GROUP BY an
 )
 SELECT
   i.an,
@@ -372,10 +382,14 @@ function createRequestSignal(parent?: AbortSignal, timeoutMs = REQUEST_TIMEOUT_M
 
 function safeRows(payload: unknown): Record<string, unknown>[] {
   if (!payload || typeof payload !== 'object') throw new Error('BMS ตอบกลับข้อมูลไม่ถูกต้อง');
-  const response = payload as { result?: unknown; data?: unknown; record_count?: unknown; MessageCode?: unknown };
+  const response = payload as { result?: unknown; data?: unknown; record_count?: unknown; MessageCode?: unknown; Message?: unknown };
   const messageCode = Number(response.MessageCode);
   if (Number.isFinite(messageCode) && messageCode >= 400) {
-    throw new Error('BMS Session ไม่ได้รับอนุญาตหรือคำขอ SQL ไม่สำเร็จ');
+    const rawMsg = typeof response.Message === 'string' ? response.Message.trim() : '';
+    if (messageCode === 401 || messageCode === 403) {
+      throw new Error(`BMS Session หมดอายุหรือไม่ได้รับอนุญาต (HTTP ${messageCode})`);
+    }
+    throw new Error(rawMsg ? `BMS SQL execution failed (${messageCode}): ${rawMsg}` : `BMS SQL execution failed (${messageCode})`);
   }
   const rows = response.data !== undefined ? response.data : response.result;
   if (rows === undefined && Number(response.record_count) === 0) return [];
@@ -387,7 +401,7 @@ function safeRows(payload: unknown): Record<string, unknown>[] {
 
 export function isBmsSessionFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? '');
-  return /BMS Session|BMS SQL execution failed \(HTTP (?:401|403)\)/i.test(message);
+  return /BMS Session (?:หมดอายุ|ไม่ได้รับอนุญาต)|BMS SQL execution failed \(HTTP (?:401|403)\)/i.test(message);
 }
 
 export async function executeSqlViaApi(
