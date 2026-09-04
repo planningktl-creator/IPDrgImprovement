@@ -55,52 +55,80 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div style={{ minHeight: '100vh', backgroundColor: '#f8fafc', color: '#0f172a', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-      {/* Top Application Bar */}
-      <header style={{ backgroundColor: '#ffffff', borderBottom: '1px solid #e2e8f0', position: 'sticky', top: 0, zIndex: 30 }}>
-        <div style={{ maxWidth: '1440px', margin: '0 auto', padding: '0 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', height: '60px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+    <div style={{ minHeight: '100vh', backgroundColor: '#f8fafc', color: '#0f172a' }}>
+      {/* Top Modern Application Bar */}
+      <header className="app-header">
+        <div style={{ maxWidth: '1440px', margin: '0 auto', padding: '0 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', height: '64px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '28px' }}>
+            {/* Hospital Branding */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div style={{
-                backgroundColor: '#2563eb',
+                background: 'linear-gradient(135deg, #2563eb 0%, #1e40af 100%)',
                 color: '#ffffff',
-                width: '34px',
-                height: '34px',
-                borderRadius: '8px',
+                width: '38px',
+                height: '38px',
+                borderRadius: '10px',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontWeight: '800',
-                fontSize: '16px',
+                fontWeight: '900',
+                fontSize: '15px',
+                letterSpacing: '-0.02em',
+                boxShadow: '0 4px 10px rgba(37, 99, 235, 0.3)',
               }}>
                 DRG
               </div>
               <div>
-                <span style={{ fontWeight: '800', fontSize: '16px', color: '#0f172a' }}>IPDrgImprovement</span>
-                <span style={{ fontSize: '11px', color: '#64748b', marginLeft: '6px' }}>รพ.กันทรลักษ์ (10929)</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontWeight: '800', fontSize: '17px', color: '#0f172a', letterSpacing: '-0.02em' }}>
+                    IPDrgImprovement
+                  </span>
+                  <span style={{
+                    fontSize: '10px',
+                    fontWeight: '700',
+                    backgroundColor: '#dbeafe',
+                    color: '#1e40af',
+                    padding: '2px 6px',
+                    borderRadius: '6px',
+                  }}>
+                    v2.0 PRO
+                  </span>
+                </div>
+                <div style={{ fontSize: '11px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span>รพ.กันทรลักษ์ (HCODE: 10929)</span>
+                </div>
               </div>
             </div>
 
-            {/* Navigation Tabs */}
-            <nav style={{ display: 'flex', gap: '4px' }}>
+            {/* Segmented Navigation Control */}
+            <nav style={{
+              display: 'flex',
+              backgroundColor: '#f1f5f9',
+              padding: '3px',
+              borderRadius: '10px',
+              border: '1px solid #e2e8f0',
+              gap: '2px',
+            }}>
               <button
                 type="button"
                 onClick={() => setActiveTab('worklist')}
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
-                  gap: '6px',
-                  padding: '8px 14px',
-                  borderRadius: '6px',
+                  gap: '8px',
+                  padding: '7px 16px',
+                  borderRadius: '8px',
                   fontSize: '13px',
-                  fontWeight: '600',
+                  fontWeight: activeTab === 'worklist' ? '700' : '500',
                   border: 'none',
                   cursor: 'pointer',
-                  backgroundColor: activeTab === 'worklist' ? '#eff6ff' : 'transparent',
+                  backgroundColor: activeTab === 'worklist' ? '#ffffff' : 'transparent',
                   color: activeTab === 'worklist' ? '#1d4ed8' : '#64748b',
+                  boxShadow: activeTab === 'worklist' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                  transition: 'all 0.15s ease',
                 }}
               >
-                <ClipboardList size={16} />
+                <ClipboardList size={16} color={activeTab === 'worklist' ? '#2563eb' : '#64748b'} />
                 ทะเบียนเคสผู้ป่วยใน (Worklist)
               </button>
 
@@ -110,38 +138,68 @@ export const App: React.FC = () => {
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
-                  gap: '6px',
-                  padding: '8px 14px',
-                  borderRadius: '6px',
+                  gap: '8px',
+                  padding: '7px 16px',
+                  borderRadius: '8px',
                   fontSize: '13px',
-                  fontWeight: '600',
+                  fontWeight: activeTab === 'optimizer' ? '700' : '500',
                   border: 'none',
                   cursor: 'pointer',
-                  backgroundColor: activeTab === 'optimizer' ? '#eff6ff' : 'transparent',
+                  backgroundColor: activeTab === 'optimizer' ? '#ffffff' : 'transparent',
                   color: activeTab === 'optimizer' ? '#1d4ed8' : '#64748b',
+                  boxShadow: activeTab === 'optimizer' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                  transition: 'all 0.15s ease',
                 }}
               >
-                <Sparkles size={16} />
+                <Sparkles size={16} color={activeTab === 'optimizer' ? '#2563eb' : '#64748b'} />
                 วิเคราะห์ DRG รายเคส (Optimizer)
               </button>
             </nav>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{
-              padding: '4px 10px',
-              borderRadius: '16px',
-              fontSize: '12px',
-              fontWeight: '500',
-              backgroundColor: sessionStatus === 'connected' ? '#dcfce7' : '#e0f2fe',
-              color: sessionStatus === 'connected' ? '#166534' : '#0369a1',
+          {/* Right Status Cluster */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            {/* Base Rate Pill */}
+            <div style={{
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
+              backgroundColor: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              padding: '5px 12px',
+              borderRadius: '20px',
+              fontSize: '12px',
+              fontWeight: '500',
+              color: '#475569',
             }}>
+              <span style={{ color: '#64748b' }}>Base Rate:</span>
+              <strong style={{ color: '#0f172a' }}>8,350 ฿/AdjRW</strong>
+            </div>
+
+            {/* BMS Status Badge */}
+            <div style={{
+              padding: '5px 14px',
+              borderRadius: '20px',
+              fontSize: '12px',
+              fontWeight: '600',
+              backgroundColor: sessionStatus === 'connected' ? '#ecfdf5' : '#f0f9ff',
+              color: sessionStatus === 'connected' ? '#047857' : '#0369a1',
+              border: sessionStatus === 'connected' ? '1px solid #a7f3d0' : '1px solid #bae6fd',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
+            }}>
+              <span style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: sessionStatus === 'connected' ? '#10b981' : '#0ea5e9',
+                display: 'inline-block',
+              }} className="animate-pulse-dot" />
               <Database size={13} />
               {sessionStatus === 'connected' ? 'BMS เชื่อมต่อแล้ว' : 'โหมดจำลอง (Demo Mode)'}
-            </span>
+            </div>
           </div>
         </div>
       </header>
