@@ -131,15 +131,32 @@ export function buildDrgPayload(v: DrgCaseInput): DrgCalculationRequest {
   };
 }
 
+export const MAX_GROUPER_CACHE_ENTRIES = 500;
+const grouperResultCache = new Map<string, DrgCalculationResponse>();
+
+export function getGrouperCacheSize(): number {
+  return grouperResultCache.size;
+}
+
+export function clearGrouperCache(): void {
+  grouperResultCache.clear();
+}
+
 export async function calculateDrg(
   payload: unknown,
   signal?: AbortSignal,
 ): Promise<DrgCalculationResponse> {
+  const cacheKey = JSON.stringify(payload);
+  const cached = grouperResultCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   // ยิงตรงเท่านั้น — ห้ามผ่าน CORS proxy (กติกาความปลอดภัยเดียวกับ DRGSeeker)
   const res = await fetch(`${DRG_API_BASE}/drg/calculate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: cacheKey,
     signal: createRequestSignal(signal),
   });
 
@@ -186,6 +203,12 @@ export async function calculateDrg(
       throw new Error(`Grouper ส่งค่า ${field} ไม่ถูกต้อง`);
     }
   }
+
+  if (grouperResultCache.size >= MAX_GROUPER_CACHE_ENTRIES) {
+    const oldestKey = grouperResultCache.keys().next().value;
+    if (oldestKey) grouperResultCache.delete(oldestKey);
+  }
+  grouperResultCache.set(cacheKey, response as DrgCalculationResponse);
 
   return response as DrgCalculationResponse;
 }

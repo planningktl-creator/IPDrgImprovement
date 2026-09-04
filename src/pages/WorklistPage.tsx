@@ -225,14 +225,14 @@ export function WorklistPage({ onSelectCaseForOptimization, connectionConfig, se
   const handleExport = async (format: 'csv' | 'xlsx') => {
     if (sessionStatus !== 'connected' || !connectionConfig) {
       if (sessionStatus === 'demo') {
-        if (format === 'csv') downloadCasesCsv(state.data.items); else downloadCasesXlsx(state.data.items);
+        if (format === 'csv') downloadCasesCsv(state.data.items); else await downloadCasesXlsx(state.data.items);
       }
       return;
     }
     setExporting(true);
     try {
       const result = await exportCaseWorklist({ ...query, cursor: undefined }, connectionConfig, format);
-      if (format === 'csv') downloadCasesCsv(result.rows); else downloadCasesXlsx(result.rows);
+      if (format === 'csv') downloadCasesCsv(result.rows); else await downloadCasesXlsx(result.rows);
       if (result.truncated) dispatch({ type: 'error', message: 'รายการเกิน 10,000 เคส ระบบส่งออกเฉพาะ 10,000 รายการแรก' });
     } catch (error) {
       if (isBmsSessionFailure(error)) onSessionError?.();

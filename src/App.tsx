@@ -1,9 +1,10 @@
+import { lazy, Suspense, useState, type ReactNode } from 'react';
 import { BrowserRouter, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Activity, ClipboardList, Database, Menu, Sparkles, X } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
-import { WorklistPage } from '@/pages/WorklistPage';
-import { OptimizerPage } from '@/pages/OptimizerPage';
+import { Activity, ClipboardList, Database, LoaderCircle, Menu, Sparkles, X } from 'lucide-react';
 import { useBmsSession } from '@/session/useBmsSession';
+
+const WorklistPage = lazy(() => import('@/pages/WorklistPage').then((m) => ({ default: m.WorklistPage })));
+const OptimizerPage = lazy(() => import('@/pages/OptimizerPage').then((m) => ({ default: m.OptimizerPage })));
 
 function statusLabel(status: ReturnType<typeof useBmsSession>['state']['status']): string {
   if (status === 'connected') return 'HIS เชื่อมต่อแล้ว';
@@ -89,7 +90,11 @@ function Shell({ children, session }: { children: ReactNode; session: ReturnType
           </div>
         </header>
 
-        <main className="app-content">{children}</main>
+        <main className="app-content">
+          <Suspense fallback={<div className="page-loading" role="status" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '300px' }}><LoaderCircle className="spin" size={28} /></div>}>
+            {children}
+          </Suspense>
+        </main>
         <footer className="app-footer">
           <span>ข้อมูลใช้เพื่อการทบทวนโดยผู้มีหน้าที่ให้รหัสเท่านั้น</span>
           <span>ไม่เขียนข้อมูลกลับ HIS · TDRG V6 Grouper</span>

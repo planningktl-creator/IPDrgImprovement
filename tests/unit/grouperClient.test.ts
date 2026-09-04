@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildDrgPayload,
   calculateDrg,
+  clearGrouperCache,
+  getGrouperCacheSize,
   DRG_API_BASE,
   DRG_VERSION,
 } from '@/drg/grouperClient';
@@ -126,10 +128,12 @@ describe('calculateDrg', () => {
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
+    clearGrouperCache();
     vi.restoreAllMocks();
   });
 
   afterEach(() => {
+    clearGrouperCache();
     globalThis.fetch = originalFetch;
   });
 
@@ -229,5 +233,40 @@ describe('calculateDrg', () => {
       json: async () => { throw new Error('bad json'); },
     });
     await expect(calculateDrg({ version: '6', data: [] })).rejects.toThrow(/JSON/);
+  });
+
+  it('caches results for identical payloads and clears cache when requested', async () => {
+    const mockResponse = {
+      status: 200,
+      data: [{ drg: '04010', mdc: '04', rw: 1.23, adjrw: 1.45 }],
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => mockResponse,
+    });
+    globalThis.fetch = fetchMock;
+
+    const payload = { version: '6', data: [{ an: '1', pdx: 'J189' }] };
+
+    // First call: cache miss, triggers fetch
+    const res1 = await calculateDrg(payload);
+    expect(res1.data[0].drg).toBe('04010');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getGrouperCacheSize()).toBe(1);
+
+    // Second call with same payload: cache hit, no fetch
+    const res2 = await calculateDrg(payload);
+    expect(res2).toEqual(res1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Clear cache
+    clearGrouperCache();
+    expect(getGrouperCacheSize()).toBe(0);
+
+    // Third call after cache clear: triggers fetch again
+    const res3 = await calculateDrg(payload);
+    expect(res3.data[0].drg).toBe('04010');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

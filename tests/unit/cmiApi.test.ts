@@ -79,10 +79,10 @@ describe('cmiApi read-only guards', () => {
     expect(result.nextCursor).toBeTruthy();
 
     await fetchCasePage({ dstart: '2023-10-01', dend: '2026-09-30', pageSize: 1, cursor: result.nextCursor ?? undefined }, config);
-    const cursorValues = fetchMock.mock.calls.slice(3).map((call) => {
+    const cursorValues = fetchMock.mock.calls.map((call) => {
       const request = call[1] as RequestInit;
       return (JSON.parse(String(request.body)) as { params?: { cursor_date?: { value?: string } } }).params?.cursor_date?.value;
-    });
+    }).filter(Boolean);
     expect(cursorValues).toContain('2026-08-07 14:30:00.000');
   });
 });

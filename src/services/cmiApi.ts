@@ -836,9 +836,9 @@ export async function fetchCasePage(input: WorklistQueryParams, config?: BmsConn
   if (!config?.apiUrl) return { items: [], nextCursor: null, hasMore: false, count: 0, totalCount: 0, summary: summarizeCases([], rates), fetchedAt: new Date().toISOString() };
 
   const apiParams = queryParamsForWorklist(params, rates);
-  // Execute sequentially to prevent HTTP 409 concurrency lock on BMS API gateway
+  // Execute sequentially to prevent HTTP 409 concurrency lock on BMS API gateway.
+  // worklistSummary computes total_count, uncoded_count, coded_count, total_adjrw, and total_income in a single unified pass.
   const pageRows = await executeCmiQuery('casePage', config, apiParams, opts.signal);
-  const countRows = await executeCmiQuery('caseCount', config, apiParams, opts.signal).catch(() => []);
   const summaryRows = await executeCmiQuery('worklistSummary', config, apiParams, opts.signal).catch(() => []);
   const rows = pageRows.map((row) => mapRawRowToCmiCaseRow(row));
   const hasMore = rows.length > params.pageSize;
@@ -846,7 +846,7 @@ export async function fetchCasePage(input: WorklistQueryParams, config?: BmsConn
   const last = items.at(-1);
   const summaryRow = summaryRows[0] ?? {};
   const totalAdjrw = numericOrNull(summaryRow.total_adjrw) ?? 0;
-  const total = numericOrNull(summaryRow.total_count) ?? numericOrNull(countRows[0]?.total_count) ?? 0;
+  const total = numericOrNull(summaryRow.total_count) ?? rows.length;
   const uncoded = numericOrNull(summaryRow.uncoded_count) ?? 0;
   const rate = params.scheme && params.scheme !== 'all' ? rates.find((item) => item.scheme === params.scheme && item.effectiveFrom <= params.dstart && (!item.effectiveTo || item.effectiveTo >= params.dend)) : null;
   const summary: CaseSummary = { total, uncoded, coded: Math.max(0, total - uncoded), totalAdjrw, averageCmi: total > 0 ? totalAdjrw / total : 0, totalIncome: numericOrNull(summaryRow.total_income) ?? 0, estimatedRevenue: calculateEstimatedRevenue(totalAdjrw, rate ? { scheme: rate.scheme, label: rate.label, baseRate: rate.baseRate, source: 'runtime-config' } : null), revenueRateLabel: rate ? `${rate.label} · ${rate.baseRate.toLocaleString()} บาท/AdjRW` : null };

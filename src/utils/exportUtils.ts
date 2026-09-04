@@ -1,4 +1,3 @@
-import * as XLSX from 'xlsx';
 import type { CmiCaseRow } from '@/cmi/caseContract';
 
 export interface ExportableCaseRow {
@@ -42,14 +41,31 @@ function downloadBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
-export function downloadCasesCsv(rows: CmiCaseRow[], filename = 'iptimprove-worklist.csv'): void {
-  const data = toExportRows(rows);
-  const worksheet = XLSX.utils.json_to_sheet(data);
-  const csv = XLSX.utils.sheet_to_csv(worksheet);
-  downloadBlob(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' }), filename);
+function escapeCsvCell(value: unknown): string {
+  if (value == null) return '';
+  const str = String(value);
+  if (/[",\r\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
 }
 
-export function downloadCasesXlsx(rows: CmiCaseRow[], filename = 'iptimprove-worklist.xlsx'): void {
+export function downloadCasesCsv(rows: CmiCaseRow[], filename = 'iptimprove-worklist.csv'): void {
+  const data = toExportRows(rows);
+  if (data.length === 0) {
+    downloadBlob(new Blob(['\uFEFF'], { type: 'text/csv;charset=utf-8' }), filename);
+    return;
+  }
+  const headers = Object.keys(data[0]) as (keyof ExportableCaseRow)[];
+  const lines = [
+    headers.map(escapeCsvCell).join(','),
+    ...data.map((row) => headers.map((h) => escapeCsvCell(row[h])).join(',')),
+  ];
+  downloadBlob(new Blob([`\uFEFF${lines.join('\r\n')}`], { type: 'text/csv;charset=utf-8' }), filename);
+}
+
+export async function downloadCasesXlsx(rows: CmiCaseRow[], filename = 'iptimprove-worklist.xlsx'): Promise<void> {
+  const XLSX = await import('xlsx');
   const data = toExportRows(rows);
   const workbook = XLSX.utils.book_new();
   const worksheet = XLSX.utils.json_to_sheet(data);
