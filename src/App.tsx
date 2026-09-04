@@ -10,17 +10,37 @@ import { ClipboardList, Sparkles, Database } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'worklist' | 'optimizer'>('worklist');
-  const [selectedAn, setSelectedAn] = useState<string>('1001');
+  const [selectedAn, setSelectedAn] = useState<string>('');
 
   // Shared BMS Session state
-  const [bmsSessionId] = useState<string>(() => {
+  const [bmsSessionId, setBmsSessionId] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       return new URLSearchParams(window.location.search).get('bms-session-id')?.trim() || '';
     }
     return '';
   });
   const [connectionConfig, setConnectionConfig] = useState<BmsConnectionConfig | null>(null);
-  const [sessionStatus, setSessionStatus] = useState<'idle' | 'connected' | 'demo' | 'error'>('demo');
+  const [sessionStatus, setSessionStatus] = useState<'idle' | 'connected' | 'demo' | 'error'>('idle');
+
+  const handleConnectSession = async (sid: string) => {
+    const trimmed = sid.trim();
+    if (!trimmed) {
+      setConnectionConfig(null);
+      setSessionStatus('idle');
+      return;
+    }
+
+    try {
+      const raw = await retrieveBmsSession(trimmed);
+      const conf = extractConnectionConfig(raw);
+      setConnectionConfig(conf);
+      setBmsSessionId(trimmed);
+      setSessionStatus('connected');
+    } catch {
+      setSessionStatus('error');
+      throw new Error('ไม่สามารถดึงการเชื่อมต่อจาก BMS Session ได้');
+    }
+  };
 
   useEffect(() => {
     let ignore = false;
@@ -182,9 +202,9 @@ export const App: React.FC = () => {
               borderRadius: '20px',
               fontSize: '12px',
               fontWeight: '600',
-              backgroundColor: sessionStatus === 'connected' ? '#ecfdf5' : '#f0f9ff',
-              color: sessionStatus === 'connected' ? '#047857' : '#0369a1',
-              border: sessionStatus === 'connected' ? '1px solid #a7f3d0' : '1px solid #bae6fd',
+              backgroundColor: sessionStatus === 'connected' ? '#ecfdf5' : '#f8fafc',
+              color: sessionStatus === 'connected' ? '#047857' : '#64748b',
+              border: sessionStatus === 'connected' ? '1px solid #a7f3d0' : '1px solid #e2e8f0',
               display: 'flex',
               alignItems: 'center',
               gap: '8px',
@@ -194,11 +214,11 @@ export const App: React.FC = () => {
                 width: '8px',
                 height: '8px',
                 borderRadius: '50%',
-                backgroundColor: sessionStatus === 'connected' ? '#10b981' : '#0ea5e9',
+                backgroundColor: sessionStatus === 'connected' ? '#10b981' : '#94a3b8',
                 display: 'inline-block',
-              }} className="animate-pulse-dot" />
+              }} />
               <Database size={13} />
-              {sessionStatus === 'connected' ? 'BMS เชื่อมต่อแล้ว' : 'โหมดจำลอง (Demo Mode)'}
+              {sessionStatus === 'connected' ? 'HIS เชื่อมต่อแล้ว' : 'HIS ยังไม่ได้เชื่อมต่อ'}
             </div>
           </div>
         </div>
@@ -211,6 +231,7 @@ export const App: React.FC = () => {
             onSelectCaseForOptimization={handleSelectCaseForOptimization}
             connectionConfig={connectionConfig}
             sessionStatus={sessionStatus}
+            onConnectSession={handleConnectSession}
           />
         ) : (
           <OptimizerPage
@@ -219,6 +240,7 @@ export const App: React.FC = () => {
             externalSessionId={bmsSessionId}
             externalConfig={connectionConfig}
             externalStatus={sessionStatus}
+            onConnectSession={handleConnectSession}
           />
         )}
       </main>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   cmiCaseToDrgInput,
 } from '@/cmi/caseAdapter';
@@ -23,12 +23,8 @@ import { DEFAULT_HCODE } from '@/drg/grouperContract';
 import {
   Search,
   AlertTriangle,
-  CheckCircle2,
-  ExternalLink,
   PlusCircle,
   Database,
-  ArrowRightLeft,
-  FileText,
   Activity,
   ChevronDown,
   ChevronUp,
@@ -37,6 +33,8 @@ import {
   Sparkles,
   TrendingUp,
 } from 'lucide-react';
+import { auditClinicalCase, type ClinicalAuditResult } from '@/audit/clinicalAuditEngine';
+import { ClinicalAuditPanel } from '@/components/ClinicalAuditPanel';
 
 export interface OptimizerPageProps {
   initialAn?: string;
@@ -44,6 +42,7 @@ export interface OptimizerPageProps {
   externalSessionId?: string;
   externalConfig?: BmsConnectionConfig | null;
   externalStatus?: 'idle' | 'connected' | 'demo' | 'error';
+  onConnectSession?: (sid: string) => Promise<void>;
 }
 
 export const OptimizerPage: React.FC<OptimizerPageProps> = ({
@@ -52,6 +51,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
   externalSessionId,
   externalConfig,
   externalStatus,
+  onConnectSession,
 }) => {
   // Session & Connection State
   const [bmsSessionId, setBmsSessionId] = useState<string>(() => {
@@ -62,12 +62,12 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
     return '';
   });
   const [connectionConfig, setConnectionConfig] = useState<BmsConnectionConfig | null>(externalConfig ?? null);
-  const [sessionStatus, setSessionStatus] = useState<'idle' | 'connected' | 'demo' | 'error'>(externalStatus ?? 'demo');
+  const [sessionStatus, setSessionStatus] = useState<'idle' | 'connected' | 'demo' | 'error'>(externalStatus ?? 'idle');
   const [hospitalCode, setHospitalCode] = useState<string>(DEFAULT_HCODE);
   const [baseRate, setBaseRate] = useState<number>(8350);
 
-  // Search & Case State
-  const [anInput, setAnInput] = useState<string>(initialAn || '1001');
+  // Search & Case State (No hardcoded default AN)
+  const [anInput, setAnInput] = useState<string>(initialAn || '');
   const [loading, setLoading] = useState<boolean>(false);
   const [loadingStep, setLoadingStep] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
@@ -86,7 +86,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
     const cleanSid = sid.trim();
     if (!cleanSid) {
       setConnectionConfig(null);
-      setSessionStatus('demo');
+      setSessionStatus('idle');
       return;
     }
 
@@ -99,11 +99,14 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
         setHospitalCode(raw.hospital_code);
       }
       setSessionStatus('connected');
+      if (onConnectSession) {
+        await onConnectSession(cleanSid);
+      }
     } catch (err) {
       setError(`ไม่สามารถเชื่อมต่อ BMS Session: ${(err as Error).message}`);
       setSessionStatus('error');
     }
-  }, []);
+  }, [onConnectSession]);
 
   // Connect on mount if session was passed in URL query param
   useEffect(() => {
@@ -138,7 +141,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
     };
   }, [bmsSessionId]);
 
-  const handleLoadAndOptimize = useCallback(async (targetAn?: string) => {
+  const handleLoadAndOptimize = useCallback(async (targetAn?: string, additionalCandidate?: string) => {
     const an = (targetAn ?? anInput).trim();
     if (!an) {
       setError('กรุณาระบุเลข AN ที่ต้องการค้นหา');
@@ -152,8 +155,9 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
 
     try {
       // Step 1: Fetch Case Detail
-      setLoadingStep('กำลังดึงข้อมูลเคสผู้ป่วย (Case Detail)...');
-      const isDemo = sessionStatus !== 'connected';
+      setLoadingStep('กำลังดึงข้อมูลเคสผู้ป่วยจริง (Case Detail จาก HIS)...');
+      // If sessionStatus is demo (such as during vitest execution), allow fallback
+      const isDemo = sessionStatus === 'demo';
       const caseRow = await fetchCaseDetail(an, connectionConfig || undefined, { useDemoFallback: isDemo });
       setCurrentCase(caseRow);
 
@@ -164,7 +168,20 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
 
       // Step 3: Extract evidenced candidates
       setLoadingStep('กำลังสกัดรหัสวินิจฉัยที่มีหลักฐานกำกับ (Candidate Extraction)...');
-      const extracted = extractCandidates(items);
+      let extracted = extractCandidates(items);
+      if (additionalCandidate) {
+        const cleanAdd = additionalCandidate.trim().toUpperCase().replace(/\./g, '');
+        if (!extracted.some((c) => c.code === cleanAdd)) {
+          extracted = [
+            {
+              code: cleanAdd,
+              source: 'coder_manual',
+              evidence: ['เพิ่มจากคำแนะนำระบบตรวจสอบความถูกต้องทางคลินิก (Clinical Audit)'],
+            },
+            ...extracted,
+          ];
+        }
+      }
       setCandidates(extracted);
 
       // Step 4: Adapt to Grouper input
@@ -195,90 +212,70 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
   }, [anInput, connectionConfig, sessionStatus, hospitalCode, baseRate]);
 
   useEffect(() => {
-    let ignore = false;
     if (initialAn) {
-      const isDemo = sessionStatus !== 'connected';
-      fetchCaseDetail(initialAn, connectionConfig || undefined, { useDemoFallback: isDemo })
-        .then(async (caseRow) => {
-          if (ignore) return;
-          setCurrentCase(caseRow);
-          const items = await fetchUsageItems(initialAn, connectionConfig || undefined, { useDemoFallback: isDemo });
-          if (ignore) return;
-          setUsageItems(items);
-          const extracted = extractCandidates(items);
-          setCandidates(extracted);
-          const drgInput = cmiCaseToDrgInput(caseRow, { hcode: hospitalCode, baseRate });
+      setAnInput(initialAn);
+      handleLoadAndOptimize(initialAn);
+    }
+  }, [initialAn, handleLoadAndOptimize]);
+
+  const handleAddManualCandidate = async () => {
+    const code = manualCode.trim().toUpperCase().replace(/\./g, '');
+    if (!code) return;
+
+    if (!candidates.some((c) => c.code === code)) {
+      const newCand: DxCandidate = {
+        code,
+        source: 'coder_manual',
+        evidence: ['เพิ่มโดย Coder (Manual override)'],
+      };
+      const updated = [...candidates, newCand];
+      setCandidates(updated);
+      setManualCode('');
+
+      if (currentCase) {
+        setLoading(true);
+        setLoadingStep(`กำลังประมวลผล DRG เมื่อเพิ่มรหัส ${code}...`);
+        try {
+          const drgInput = cmiCaseToDrgInput(currentCase, { hcode: hospitalCode, baseRate });
           const result = await suggestHigherDrg(
             drgInput,
-            extracted.map((c) => ({
+            updated.map((c) => ({
               code: c.code,
-              reason: `พบในหลักฐานการใช้ยา (${c.source})`,
+              reason: c.source === 'coder_manual' ? 'Coder เพิ่มเอง' : `พบในหลักฐาน (${c.source})`,
               evidence: c.evidence,
             })),
           );
-          if (ignore) return;
           setBaseline(result.baseline);
           setSuggestions(result.suggestions);
-        })
-        .catch((err) => {
-          if (!ignore) setError((err as Error).message);
-        });
-    }
-
-    return () => {
-      ignore = true;
-    };
-  }, [initialAn, connectionConfig, sessionStatus, hospitalCode, baseRate]);
-
-  const handleAddManualCandidate = async () => {
-    const code = manualCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (!code) return;
-    if (code.length < 3) {
-      setError('รหัส ICD-10 ต้องมีความยาวอย่างน้อย 3 ตัวอักษร');
-      return;
-    }
-
-    const newCandidate: DxCandidate = {
-      code,
-      source: 'coder_manual',
-      evidence: ['ระบุโดย Coder ผู้ใช้งาน'],
-    };
-
-    const updatedCandidates = [
-      ...candidates.filter((c) => c.code !== code),
-      newCandidate,
-    ];
-    setCandidates(updatedCandidates);
-    setManualCode('');
-
-    if (currentCase) {
-      setLoading(true);
-      setLoadingStep(`กำลังคำนวณผลกระทบของรหัส ${code} ต่อ DRG...`);
-      try {
-        const drgInput = cmiCaseToDrgInput(currentCase, {
-          hcode: hospitalCode,
-          baseRate,
-        });
-
-        const result = await suggestHigherDrg(
-          drgInput,
-          updatedCandidates.map((c) => ({
-            code: c.code,
-            reason: c.source === 'coder_manual' ? 'ระบุโดย Coder' : `พบในหลักฐานการใช้ยา (${c.source})`,
-            evidence: c.evidence,
-          })),
-        );
-
-        setBaseline(result.baseline);
-        setSuggestions(result.suggestions);
-      } catch (err) {
-        setError((err as Error).message);
-      } finally {
-        setLoading(false);
-        setLoadingStep('');
+        } catch (err) {
+          setError((err as Error).message);
+        } finally {
+          setLoading(false);
+          setLoadingStep('');
+        }
       }
     }
   };
+
+  const handleApplyCodeFromAudit = (code: string) => {
+    handleLoadAndOptimize(undefined, code);
+  };
+
+  // Run Clinical Audit on loaded case
+  const auditResult = useMemo<ClinicalAuditResult | null>(() => {
+    if (!currentCase) return null;
+    return auditClinicalCase({
+      an: currentCase.an || '',
+      age: currentCase.age,
+      sex: currentCase.sex,
+      los: currentCase.los ?? 0,
+      pdx: currentCase.pdx,
+      sdx: [currentCase.sdx1, currentCase.sdx2, currentCase.sdx3, currentCase.sdx4].filter(Boolean) as string[],
+      proc: [currentCase.proc1, currentCase.proc2, currentCase.proc3].filter(Boolean) as string[],
+      rw: baseline?.rw ?? currentCase.rw,
+      adjrw: baseline?.adjrw ?? currentCase.adjrw,
+    });
+  }, [currentCase, baseline]);
 
   const toggleEvidence = (key: string) => {
     setExpandedEvidence((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -287,16 +284,9 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
   const topSuggestion = suggestions.length > 0 ? suggestions[0] : null;
 
   return (
-    <div style={{ minHeight: '100vh', backgroundColor: '#f8fafc', color: '#0f172a' }}>
-      {/* Top Warning Banner */}
-      <div style={{
-        backgroundColor: '#fffbeb',
-        borderBottom: '1px solid #fde68a',
-        padding: '12px 24px',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '12px',
-      }}>
+    <div style={{ minHeight: 'calc(100vh - 64px)', backgroundColor: '#f8fafc', paddingBottom: '40px' }}>
+      {/* Disclaimer Banner */}
+      <div className="disclaimer-banner">
         <AlertTriangle style={{ color: '#d97706', flexShrink: 0 }} size={20} />
         <div style={{ fontSize: '13px', color: '#92400e' }}>
           <strong>ข้อเสนอแนะเพื่อทบทวนโดย coder เท่านั้น — ต้องมีหลักฐานเวชระเบียนรองรับก่อนเปลี่ยนรหัส</strong>
@@ -326,7 +316,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h2 style={{ fontSize: '22px', fontWeight: '800', margin: 0, color: '#0f172a' }}>
-                DRG Optimizer & Clinical Simulation
+                DRG Optimizer & Clinical Accuracy Audit
               </h2>
               <span style={{
                 backgroundColor: '#eff6ff',
@@ -341,7 +331,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
               </span>
             </div>
             <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#64748b' }}>
-              ระบบวิเคราะห์ข้อมูลเคสผู้ป่วยและแนะนำรหัสโรคเพื่อ DRG / AdjRW ที่สูงขึ้นอย่างมีหลักฐานเวชระเบียนรองรับ
+              วิเคราะห์ความถูกต้องของรหัสโรคตามเกณฑ์ สรท. และแนะนำรหัสโรคเพื่อ DRG / AdjRW ที่สะท้อนความรุนแรงจริง
             </p>
           </div>
 
@@ -351,9 +341,9 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
               borderRadius: '20px',
               fontSize: '12px',
               fontWeight: '600',
-              backgroundColor: sessionStatus === 'connected' ? '#dcfce7' : '#eff6ff',
-              color: sessionStatus === 'connected' ? '#166534' : '#1d4ed8',
-              border: `1px solid ${sessionStatus === 'connected' ? '#bbf7d0' : '#bfdbfe'}`,
+              backgroundColor: sessionStatus === 'connected' ? '#dcfce7' : '#f1f5f9',
+              color: sessionStatus === 'connected' ? '#166534' : '#64748b',
+              border: `1px solid ${sessionStatus === 'connected' ? '#bbf7d0' : '#e2e8f0'}`,
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
@@ -362,10 +352,10 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
                 width: '7px',
                 height: '7px',
                 borderRadius: '50%',
-                backgroundColor: sessionStatus === 'connected' ? '#10b981' : '#3b82f6',
-              }} className="animate-pulse-dot" />
+                backgroundColor: sessionStatus === 'connected' ? '#10b981' : '#94a3b8',
+              }} />
               <Database size={14} />
-              {sessionStatus === 'connected' ? 'BMS เชื่อมต่อแล้ว' : 'โหมดจำลอง (Demo Mode)'}
+              {sessionStatus === 'connected' ? 'BMS เชื่อมต่อแล้ว' : 'ยังไม่ได้เชื่อมต่อ BMS'}
             </span>
 
             <span style={{
@@ -384,7 +374,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
 
         {/* Configuration & Search Bar */}
         <div className="card-panel" style={{ padding: '20px', marginBottom: '24px' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px', marginBottom: '16px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px' }}>
             <div>
               <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '6px' }}>
                 เลขที่ผู้ป่วยใน (AN)
@@ -392,7 +382,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
               <div style={{ display: 'flex', gap: '8px' }}>
                 <input
                   type="text"
-                  placeholder="ระบุเลข AN เช่น 1001"
+                  placeholder="ระบุเลข AN ที่ต้องการวิเคราะห์..."
                   value={anInput}
                   onChange={(e) => setAnInput(e.target.value)}
                   style={{
@@ -425,7 +415,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
               <div style={{ display: 'flex', gap: '8px' }}>
                 <input
                   type="text"
-                  placeholder="เช่น bms-session-abc123"
+                  placeholder="ระบุ BMS Session ID..."
                   value={bmsSessionId}
                   onChange={(e) => setBmsSessionId(e.target.value)}
                   style={{
@@ -450,7 +440,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
 
             <div>
               <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '6px' }}>
-                Base Rate กลาง รพ. (บาท/AdjRW)
+                อัตราฐานกลาง รพ. (บาท/AdjRW)
               </label>
               <input
                 type="number"
@@ -466,43 +456,6 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
                 }}
               />
             </div>
-          </div>
-
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>ตัวอย่างทดสอบ:</span>
-            <button
-              type="button"
-              className="btn-modern btn-ghost-neutral"
-              onClick={() => {
-                setAnInput('1001');
-                handleLoadAndOptimize('1001');
-              }}
-              style={{ padding: '4px 10px', fontSize: '12px', color: '#1d4ed8', backgroundColor: '#eff6ff', borderColor: '#bfdbfe' }}
-            >
-              เคสจำลอง AN 1001 (Sepsis / DM / Pneumonia)
-            </button>
-            <button
-              type="button"
-              className="btn-modern btn-ghost-neutral"
-              onClick={() => {
-                setAnInput('1002');
-                handleLoadAndOptimize('1002');
-              }}
-              style={{ padding: '4px 10px', fontSize: '12px', color: '#b45309', backgroundColor: '#fffbeb', borderColor: '#fde68a' }}
-            >
-              เคสจำลอง AN 1002 (Type 2 DM with coma)
-            </button>
-            <button
-              type="button"
-              className="btn-modern btn-ghost-neutral"
-              onClick={() => {
-                setAnInput('1007');
-                handleLoadAndOptimize('1007');
-              }}
-              style={{ padding: '4px 10px', fontSize: '12px', color: '#047857', backgroundColor: '#ecfdf5', borderColor: '#a7f3d0' }}
-            >
-              เคสจำลอง AN 1007 (STEMI / Angioplasty)
-            </button>
           </div>
         </div>
 
@@ -542,6 +495,49 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
           }}>
             <AlertTriangle size={20} color="#dc2626" />
             <span><strong>ข้อผิดพลาด:</strong> {error}</span>
+          </div>
+        )}
+
+        {/* Initial Empty Guide when no case loaded */}
+        {!currentCase && !loading && (
+          <div style={{
+            backgroundColor: '#ffffff',
+            borderRadius: '12px',
+            padding: '48px 24px',
+            textAlign: 'center',
+            border: '1px solid #e2e8f0',
+            marginBottom: '24px',
+          }}>
+            <div style={{
+              width: '60px',
+              height: '60px',
+              borderRadius: '50%',
+              backgroundColor: '#eff6ff',
+              color: '#2563eb',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto 16px auto',
+            }}>
+              <Search size={28} />
+            </div>
+            <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', fontWeight: '700', color: '#0f172a' }}>
+              พร้อมสำหรับการวิเคราะห์ DRG และตรวจสอบความถูกต้องทางคลินิก
+            </h3>
+            <p style={{ margin: '0 auto 20px auto', maxWidth: '520px', fontSize: '13px', color: '#64748b', lineHeight: '1.6' }}>
+              ระบุเลข AN ในช่องด้านบนเพื่อดึงข้อมูลจริงจากระบบ HIS หรือย้อนกลับไปเลือกเคสจากแท็บ
+              <strong> ทะเบียนเคสผู้ป่วยใน (Worklist)</strong>
+            </p>
+            {onBackToWorklist && (
+              <button
+                type="button"
+                className="btn-modern btn-primary-gradient"
+                onClick={onBackToWorklist}
+                style={{ padding: '8px 18px', fontSize: '13px' }}
+              >
+                ไปที่ทะเบียนเคสผู้ป่วยใน
+              </button>
+            )}
           </div>
         )}
 
@@ -628,10 +624,16 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
                 </div>
               </div>
             </div>
+          </div>
+        )}
 
-            <div style={{ marginTop: '14px', fontSize: '12px', color: '#94a3b8' }}>
-              * ข้อมูลที่ CaseDetail ไม่มี: กำหนดค่ามาตรฐานเปิดเผย: น้ำหนัก = 0 kg, อายุวัน = 0, LOS ชม. = 0, Disch Status = {currentCase.dchtype || '1'}{currentCase.dchstts || '1'}
-            </div>
+        {/* Clinical Audit Panel Component */}
+        {auditResult && (
+          <div style={{ marginBottom: '24px' }}>
+            <ClinicalAuditPanel
+              audit={auditResult}
+              onApplyCode={handleApplyCodeFromAudit}
+            />
           </div>
         )}
 
@@ -753,48 +755,40 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
                     <div
                       key={c.code}
                       style={{
-                        border: '1px solid #e2e8f0',
-                        backgroundColor: isCurrentPdx ? '#eff6ff' : isCurrentSdx ? '#f8fafc' : '#ffffff',
-                        borderRadius: '10px',
-                        padding: '10px 14px',
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: '1px solid #cbd5e1',
+                        backgroundColor: isCurrentPdx ? '#eff6ff' : isCurrentSdx ? '#ecfdf5' : '#ffffff',
                         display: 'flex',
-                        flexDirection: 'column',
-                        gap: '6px',
+                        alignItems: 'center',
+                        gap: '8px',
                         boxShadow: '0 1px 2px rgba(0,0,0,0.03)',
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span className="chip-code chip-pdx" style={{ fontSize: '13px' }}>
-                          {c.code}
+                      <span style={{ fontWeight: '800', color: '#0f172a', fontSize: '14px' }}>
+                        {c.code}
+                      </span>
+                      {isCurrentPdx && (
+                        <span style={{ fontSize: '10px', backgroundColor: '#bfdbfe', color: '#1e40af', padding: '1px 5px', borderRadius: '4px', fontWeight: '700' }}>
+                          PDx เดิม
                         </span>
-                        <span className={`evidence-pill-tag ${
-                          c.source === 'need_order_reason' ? 'evidence-pill-need_order' :
-                          c.source === 'coder_manual' ? 'evidence-pill-coder' : 'evidence-pill-presc'
-                        }`}>
-                          {c.source === 'need_order_reason' ? 'need_order' : c.source === 'coder_manual' ? 'coder' : 'presc_reason'}
+                      )}
+                      {isCurrentSdx && (
+                        <span style={{ fontSize: '10px', backgroundColor: '#a7f3d0', color: '#065f46', padding: '1px 5px', borderRadius: '4px', fontWeight: '700' }}>
+                          SDx เดิม
                         </span>
-                        <a
-                          href={`https://had-api.moph.go.th/cmi/libs/icd10/${c.code}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          title="ดูคำอธิบายรหัสในคลังข้อมูล MoPH"
-                          style={{ color: '#2563eb', display: 'flex', alignItems: 'center' }}
-                        >
-                          <ExternalLink size={13} />
-                        </a>
-                      </div>
-
-                      {c.evidence.length > 0 && (
-                        <div style={{ fontSize: '11px', color: '#64748b', maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {c.evidence[0]}
-                        </div>
+                      )}
+                      {!isCurrentPdx && !isCurrentSdx && (
+                        <span style={{ fontSize: '10px', backgroundColor: '#fef3c7', color: '#92400e', padding: '1px 5px', borderRadius: '4px', fontWeight: '700' }}>
+                          พบหลักฐาน
+                        </span>
                       )}
                     </div>
                   );
                 })
               ) : (
                 <div style={{ fontSize: '13px', color: '#94a3b8' }}>
-                  ไม่พบรหัสโรคที่ระบุในเหตุผลการใช้ยาสำหรับเคสนี้
+                  ไม่พบรหัสโรคในรายการสั่งใช้ยา สามารถกรอกรหัส ICD-10 เองได้ที่ช่องด้านบน
                 </div>
               )}
             </div>
@@ -802,167 +796,147 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
         )}
 
         {/* Ranked Suggestions Table */}
-        {suggestions.length > 0 && (
-          <div className="card-panel" style={{ padding: '24px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '8px' }}>
+        {currentCase && suggestions.length > 0 && (
+          <div className="workbench-panel">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
               <div>
-                <h3 style={{ fontSize: '18px', fontWeight: '800', margin: 0, color: '#0f172a' }}>
-                  ข้อเสนอแนะการปรับปรุงรหัสโรค (จัดอันดับตาม ΔAdjRW สูงสุด)
+                <h3 style={{ fontSize: '16px', fontWeight: '800', margin: 0, color: '#0f172a' }}>
+                  อันดับผลการจำลองจัดกลุ่ม DRG ที่สูงขึ้น ({suggestions.length} รูปแบบ)
                 </h3>
                 <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#64748b' }}>
-                  พบ {suggestions.length} รูปแบบที่ทำให้ค่า DRG / AdjRW สูงขึ้นกว่าเดิม
+                  เรียงตามผลต่างค่าน้ำหนักสัมพัทธ์ (Delta AdjRW) จากมากไปหาน้อย
                 </p>
               </div>
             </div>
 
-            <div className="modern-table-wrap">
-              <table className="modern-table">
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
                 <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>รูปแบบข้อเสนอแนะ</th>
-                    <th>รหัส PDx / SDx ที่ปรับ</th>
-                    <th>DRG ใหม่</th>
-                    <th>AdjRW ใหม่</th>
-                    <th>ΔAdjRW ที่เพิ่มขึ้น</th>
-                    <th>ประมาณการเงินเพิ่ม</th>
-                    <th>หลักฐานประกอบ</th>
+                  <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569', fontWeight: '700' }}>
+                    <th style={{ padding: '12px 14px' }}>อันดับ</th>
+                    <th style={{ padding: '12px 14px' }}>การปรับเปลี่ยน</th>
+                    <th style={{ padding: '12px 14px' }}>PDx แนะนำ</th>
+                    <th style={{ padding: '12px 14px' }}>SDx ทั้งหมด</th>
+                    <th style={{ padding: '12px 14px' }}>DRG ใหม่</th>
+                    <th style={{ padding: '12px 14px' }}>AdjRW</th>
+                    <th style={{ padding: '12px 14px' }}>ส่วนต่าง (Delta)</th>
+                    <th style={{ padding: '12px 14px' }}>ผลกระทบรายได้</th>
+                    <th style={{ padding: '12px 14px' }}>หลักฐานประกอบ</th>
                   </tr>
                 </thead>
                 <tbody>
                   {suggestions.map((s, idx) => {
-                    const diffMoney = s.delta != null ? s.delta * baseRate : 0;
-                    const rowKey = `${s.kind}-${s.pdx}-${s.drg}-${idx}`;
-                    const isExpanded = expandedEvidence[rowKey];
+                    const gain = s.delta != null && s.delta > 0;
+                    const evidenceKey = `sugg-${idx}`;
+                    const hasEvidence = s.evidence && s.evidence.length > 0;
 
                     return (
-                      <React.Fragment key={rowKey}>
-                        <tr style={{ backgroundColor: idx === 0 ? '#f0fdf4' : '#ffffff' }}>
-                          <td style={{ fontWeight: '700', color: '#0f172a' }}>
-                            {idx + 1}
-                          </td>
-                          <td>
+                      <React.Fragment key={idx}>
+                        <tr
+                          style={{
+                            borderBottom: '1px solid #f1f5f9',
+                            backgroundColor: idx === 0 ? '#f0fdf4' : '#ffffff',
+                            fontWeight: idx === 0 ? '600' : 'normal',
+                          }}
+                        >
+                          <td style={{ padding: '12px 14px' }}>
                             <span style={{
                               display: 'inline-flex',
                               alignItems: 'center',
-                              gap: '4px',
-                              padding: '3px 8px',
-                              borderRadius: '4px',
-                              fontSize: '12px',
-                              fontWeight: '700',
-                              backgroundColor: s.kind === 'swap_pdx' ? '#eff6ff' : '#f0fdf4',
-                              color: s.kind === 'swap_pdx' ? '#1d4ed8' : '#15803d',
-                              border: `1px solid ${s.kind === 'swap_pdx' ? '#bfdbfe' : '#bbf7d0'}`,
+                              justifyContent: 'center',
+                              width: '22px',
+                              height: '22px',
+                              borderRadius: '50%',
+                              backgroundColor: idx === 0 ? '#10b981' : '#e2e8f0',
+                              color: idx === 0 ? '#ffffff' : '#475569',
+                              fontSize: '11px',
+                              fontWeight: '800',
                             }}>
-                              {s.kind === 'swap_pdx' ? (
-                                <>
-                                  <ArrowRightLeft size={13} />
-                                  สลับเป็น PDx
-                                </>
-                              ) : (
-                                <>
-                                  <PlusCircle size={13} />
-                                  เพิ่ม SDx
-                                </>
-                              )}
+                              {idx + 1}
                             </span>
                           </td>
-                          <td>
-                            <div style={{ fontWeight: '700', color: '#1e40af' }}>
-                              PDx: {s.pdx}
-                            </div>
-                            {s.sdx.length > 0 && (
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '3px' }}>
-                                <span style={{ fontSize: '11px', color: '#64748b' }}>SDx:</span>
-                                <span style={{ fontSize: '12px', color: '#334155', fontWeight: '500' }}>
-                                  {s.sdx.join(', ')}
+                          <td style={{ padding: '12px 14px' }}>
+                            <span style={{
+                              fontSize: '11px',
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              fontWeight: '700',
+                              backgroundColor: s.kind === 'add_sdx' ? '#eff6ff' : '#fef3c7',
+                              color: s.kind === 'add_sdx' ? '#1d4ed8' : '#b45309',
+                            }}>
+                              {s.kind === 'add_sdx' ? '+ เพิ่ม SDx' : '⇄ สลับ PDx'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '12px 14px' }}>
+                            <span className="chip-code chip-pdx" style={{ fontSize: '13px' }}>
+                              {s.pdx}
+                            </span>
+                          </td>
+                          <td style={{ padding: '12px 14px' }}>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', maxWidth: '320px' }}>
+                              {s.sdx.map((code, sIdx) => (
+                                <span key={sIdx} className="chip-code chip-sdx" style={{ fontSize: '11px', padding: '1px 6px' }}>
+                                  {code}
                                 </span>
-                              </div>
-                            )}
-                          </td>
-                          <td>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                              <span className="chip-code chip-drg" style={{ fontSize: '14px' }}>
-                                {s.drg}
-                              </span>
-                              <a
-                                href={`https://had-api.moph.go.th/cmi/libs/drg-name/${s.drg}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                title="ดูรายละเอียด DRG ในคลังข้อมูล MoPH"
-                                style={{ color: '#2563eb' }}
-                              >
-                                <ExternalLink size={13} />
-                              </a>
+                              ))}
                             </div>
                           </td>
-                          <td style={{ fontWeight: '700', color: '#0f172a' }}>
+                          <td style={{ padding: '12px 14px', fontWeight: '800', color: '#0f172a' }}>
+                            {s.drg}
+                          </td>
+                          <td style={{ padding: '12px 14px', fontWeight: '700', color: '#059669' }}>
                             {s.adjrw != null ? s.adjrw.toFixed(4) : '-'}
                           </td>
-                          <td>
+                          <td style={{ padding: '12px 14px' }}>
                             <span style={{
-                              backgroundColor: '#dcfce7',
-                              color: '#15803d',
                               fontWeight: '800',
-                              padding: '3px 8px',
-                              borderRadius: '6px',
-                              fontSize: '12px',
-                              border: '1px solid #86efac',
+                              color: gain ? '#16a34a' : '#64748b',
+                              fontSize: '13px',
                             }}>
-                              +{s.delta != null ? s.delta.toFixed(4) : '-'}
+                              {s.delta != null ? `${s.delta >= 0 ? '+' : ''}${s.delta.toFixed(4)}` : '-'}
                             </span>
                           </td>
-                          <td style={{ fontWeight: '700', color: '#059669' }}>
-                            +{diffMoney.toLocaleString('th-TH', { maximumFractionDigits: 0 })} บ.
+                          <td style={{ padding: '12px 14px', fontWeight: '700', color: gain ? '#047857' : '#64748b' }}>
+                            {s.delta != null ? `+${(s.delta * baseRate).toLocaleString('th-TH', { maximumFractionDigits: 0 })} ฿` : '-'}
                           </td>
-                          <td>
-                            <button
-                              type="button"
-                              onClick={() => toggleEvidence(rowKey)}
-                              style={{
-                                background: 'none',
-                                border: 'none',
-                                color: '#2563eb',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                fontSize: '12px',
-                                fontWeight: '600',
-                                padding: 0,
-                              }}
-                            >
-                              <FileText size={14} />
-                              หลักฐาน
-                              {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                            </button>
+                          <td style={{ padding: '12px 14px' }}>
+                            {hasEvidence ? (
+                              <button
+                                type="button"
+                                onClick={() => toggleEvidence(evidenceKey)}
+                                style={{
+                                  background: 'none',
+                                  border: 'none',
+                                  color: '#2563eb',
+                                  fontSize: '12px',
+                                  fontWeight: '600',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                }}
+                              >
+                                {expandedEvidence[evidenceKey] ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                {s.evidence!.length} รายการ
+                              </button>
+                            ) : (
+                              <span style={{ fontSize: '11px', color: '#94a3b8' }}>-</span>
+                            )}
                           </td>
                         </tr>
 
-                        {isExpanded && (
+                        {/* Expandable Evidence Sub-row */}
+                        {hasEvidence && expandedEvidence[evidenceKey] && (
                           <tr style={{ backgroundColor: '#f8fafc' }}>
-                            <td colSpan={8} style={{ padding: '14px 18px', fontSize: '13px' }}>
-                              <div style={{ color: '#334155', marginBottom: '8px' }}>
-                                <strong>เหตุผลที่แนะนำ:</strong> {s.reason}
+                            <td colSpan={9} style={{ padding: '10px 20px', borderBottom: '1px solid #e2e8f0' }}>
+                              <div style={{ fontSize: '12px', color: '#475569', lineHeight: '1.6' }}>
+                                <strong>หลักฐานในระบบการใช้ยา:</strong>
+                                <ul style={{ margin: '4px 0 0 0', paddingLeft: '20px' }}>
+                                  {s.evidence!.map((ev, eIdx) => (
+                                    <li key={eIdx}>{ev}</li>
+                                  ))}
+                                </ul>
                               </div>
-                              {s.evidence && s.evidence.length > 0 ? (
-                                <div className="evidence-quote-box">
-                                  <strong>รายการหลักฐานที่พบ:</strong>
-                                  <ul style={{ margin: '4px 0 0 0', paddingLeft: '20px', color: '#475569' }}>
-                                    {s.evidence.map((ev, evIdx) => (
-                                      <li key={evIdx} style={{ marginTop: '2px' }}>{ev}</li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              ) : (
-                                <div style={{ color: '#94a3b8' }}>ไม่มีหลักฐานเพิ่มเติม</div>
-                              )}
-                              {s.warning && (
-                                <div style={{ color: '#d97706', marginTop: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                  <AlertTriangle size={15} />
-                                  <span><strong>คำเตือนจาก Grouper:</strong> {s.warning}</span>
-                                </div>
-                              )}
                             </td>
                           </tr>
                         )}
@@ -974,22 +948,7 @@ export const OptimizerPage: React.FC<OptimizerPageProps> = ({
             </div>
           </div>
         )}
-
-        {/* Empty state when loaded but no higher DRG found */}
-        {currentCase && suggestions.length === 0 && !loading && (
-          <div className="card-panel" style={{ padding: '48px', textAlign: 'center' }}>
-            <CheckCircle2 style={{ color: '#059669', margin: '0 auto 12px auto' }} size={44} />
-            <h3 style={{ fontSize: '18px', fontWeight: '800', color: '#0f172a', margin: '0 0 6px 0' }}>
-              รหัสเดิมเป็นค่าสูงสุดแล้ว หรือไม่พบรหัสทดแทนที่ให้ DRG สูงกว่า
-            </h3>
-            <p style={{ fontSize: '14px', color: '#64748b', margin: 0 }}>
-              เคสนี้ได้รับการลงรหัสที่ครอบคลุม หรือยังไม่มีหลักฐานการใช้ยาตัวอื่นที่รองรับรหัสโรคเพิ่มเติม
-            </p>
-          </div>
-        )}
       </div>
     </div>
   );
 };
-
-export default OptimizerPage;

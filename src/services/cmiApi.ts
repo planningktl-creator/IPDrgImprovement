@@ -721,18 +721,16 @@ export async function fetchCaseDetail(
   const cleanAn = an.trim();
   if (!cleanAn) throw new Error('กรุณาระบุ AN ที่ต้องการตรวจสอบ');
 
-  if (opts.useDemoFallback || !config || !config.apiUrl) {
+  if (opts.useDemoFallback) {
     const foundDemo = DEMO_WORKLIST_CASES.find((c) => c.an === cleanAn);
     if (foundDemo) {
       return { ...foundDemo };
     }
-    if (cleanAn === '1001' || opts.useDemoFallback) {
-      return { ...DEMO_CASE_DETAIL, an: cleanAn };
-    }
+    return { ...DEMO_CASE_DETAIL, an: cleanAn };
   }
 
   if (!config?.apiUrl) {
-    throw new Error('ยังไม่ได้เชื่อมต่อ BMS Session กรุณาระบุ session ID หรือใช้โหมดทดสอบ');
+    throw new Error('ยังไม่ได้เชื่อมต่อ BMS Session กรุณาระบุ BMS Session ID เพื่อเชื่อมต่อฐานข้อมูล HOSxP/HIS จริง');
   }
 
   const response = await executeSqlViaApi(
@@ -755,7 +753,7 @@ export async function fetchCaseWorklist(
   config?: BmsConnectionConfig,
   opts: { signal?: AbortSignal; useDemoFallback?: boolean } = {},
 ): Promise<CmiCaseRow[]> {
-  if (opts.useDemoFallback || !config || !config.apiUrl) {
+  if (opts.useDemoFallback) {
     let list = [...DEMO_WORKLIST_CASES];
     if (params.statusFilter === 'uncoded') {
       list = list.filter((c) => c.remark === 'ยังไม่ลงรหัสโรค' || !c.pdx);
@@ -782,6 +780,11 @@ export async function fetchCaseWorklist(
       list = list.filter((c) => !c.dchdate || c.dchdate <= params.dend);
     }
     return list;
+  }
+
+  if (!config || !config.apiUrl) {
+    // Real data only: Do NOT fallback to mock data when disconnected
+    return [];
   }
 
   const queryParams: Record<string, { value: string | number; value_type: string }> = {
@@ -869,10 +872,8 @@ export async function fetchUsageItems(
   const cleanAn = an.trim();
   if (!cleanAn) return [];
 
-  if (opts.useDemoFallback || !config || !config.apiUrl) {
-    if (cleanAn === '1001' || opts.useDemoFallback) {
-      return DEMO_USAGE_ITEMS.map((item) => ({ ...item, an: cleanAn }));
-    }
+  if (opts.useDemoFallback) {
+    return DEMO_USAGE_ITEMS.map((item) => ({ ...item, an: cleanAn }));
   }
 
   if (!config?.apiUrl) return [];

@@ -1,113 +1,173 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { WorklistPage } from '@/pages/WorklistPage';
+import * as cmiApi from '@/services/cmiApi';
+import type { CmiCaseRow } from '@/cmi/caseContract';
+
+const MOCK_CASES: CmiCaseRow[] = [
+  {
+    an: '660001',
+    hn: '0054321',
+    ptname: 'นาย ประสิทธิ์ มีสุข',
+    sex: 'ชาย',
+    age: 68,
+    firstWard: '01',
+    firstWardName: 'หอผู้ป่วยอายุรกรรมชาย',
+    lastWard: '01',
+    lastWardName: 'หอผู้ป่วยอายุรกรรมชาย',
+    admdate: '2026-08-01',
+    dchdate: '2026-08-07',
+    los: 6,
+    dchtype: '1',
+    dchstts: '1',
+    drg: '04010',
+    mdc: '04',
+    rw: 0.985,
+    adjrw: 1.052,
+    pdx: 'J189',
+    sdx1: 'I10',
+    income: 18500,
+    remainMoney: 0,
+    remark: '-',
+  },
+  {
+    an: '660002',
+    hn: '0067890',
+    ptname: 'นาง สมใจ ทวีทรัพย์',
+    sex: 'หญิง',
+    age: 54,
+    firstWard: '02',
+    firstWardName: 'หอผู้ป่วยอายุรกรรมหญิง',
+    lastWard: '02',
+    lastWardName: 'หอผู้ป่วยอายุรกรรมหญิง',
+    admdate: '2026-08-10',
+    dchdate: '2026-08-13',
+    los: 3,
+    dchtype: '1',
+    dchstts: '1',
+    drg: null,
+    mdc: null,
+    rw: null,
+    adjrw: 0,
+    pdx: null,
+    income: 8200,
+    remainMoney: 0,
+    remark: 'ยังไม่ลงรหัสโรค',
+  },
+];
 
 describe('WorklistPage Component', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('renders worklist table with summary KPI cards and cases', async () => {
+  it('renders disconnected state and connection form when offline (no mock data leakage)', () => {
     const onSelectMock = vi.fn();
     render(
       <WorklistPage
         onSelectCaseForOptimization={onSelectMock}
         connectionConfig={null}
-        sessionStatus="demo"
+        sessionStatus="idle"
       />,
     );
 
+    // Verify header and offline badge
     expect(screen.getByText(/ทะเบียนเคสผู้ป่วยใน/i)).toBeInTheDocument();
+    expect(screen.getByText(/HIS Offline/i)).toBeInTheDocument();
+
+    // Verify BMS connection prompt is displayed
+    expect(screen.getByText(/พร้อมเชื่อมต่อฐานข้อมูลผู้ป่วยในจริง/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/ระบุ BMS Session ID/i)).toBeInTheDocument();
+
+    // Verify no mock case IDs are displayed
+    expect(screen.queryByText('1001')).not.toBeInTheDocument();
+    expect(screen.queryByText('1002')).not.toBeInTheDocument();
+  });
+
+  it('renders dropdown filter bars for Year, Month, Ward, Status, and Scheme', () => {
+    render(
+      <WorklistPage
+        onSelectCaseForOptimization={vi.fn()}
+        connectionConfig={null}
+        sessionStatus="idle"
+      />,
+    );
+
+    // Verify dropdown selects exist
+    const selects = screen.getAllByRole('combobox');
+    expect(selects.length).toBe(5); // Fiscal Year, Month, Ward, Status, Scheme
+    expect(screen.getByText(/ปีงบประมาณ:/i)).toBeInTheDocument();
+    expect(screen.getByText(/เดือนในรอบปีงบ:/i)).toBeInTheDocument();
+    expect(screen.getByText(/สถานะการลงรหัส:/i)).toBeInTheDocument();
+  });
+
+  it('fetches real cases, displays KPIs, clinical audit badges, and handles filtering', async () => {
+    vi.spyOn(cmiApi, 'fetchCaseWorklist').mockResolvedValue(MOCK_CASES);
+
+    const onSelectMock = vi.fn();
+    render(
+      <WorklistPage
+        onSelectCaseForOptimization={onSelectMock}
+        connectionConfig={{
+          apiUrl: 'https://test-his.hospital.in.th',
+          databaseType: 'postgresql',
+          appIdentifier: 'test',
+        }}
+        sessionStatus="connected"
+      />,
+    );
 
     // Verify cases are rendered
     await waitFor(() => {
-      expect(screen.getByText('1001')).toBeInTheDocument();
-      expect(screen.getByText('1002')).toBeInTheDocument();
-      expect(screen.getAllByText(/ยังไม่ลงรหัสโรค/i).length).toBeGreaterThan(0);
+      expect(screen.getByText('AN: 660001')).toBeInTheDocument();
+      expect(screen.getByText('AN: 660002')).toBeInTheDocument();
+      expect(screen.getByText('นาย ประสิทธิ์ มีสุข')).toBeInTheDocument();
+      expect(screen.getByText('นาง สมใจ ทวีทรัพย์')).toBeInTheDocument();
     });
 
-    // Test filter by uncoded
-    const uncodedFilterBtn = screen.getByRole('button', { name: /ยังไม่ลงรหัสโรค/i });
-    fireEvent.click(uncodedFilterBtn);
+    // Verify KPI summary
+    expect(screen.getByText('2 ราย')).toBeInTheDocument(); // total
+
+    // Test Status Dropdown change to 'uncoded'
+    const statusSelect = screen.getAllByRole('combobox')[3]; // 4th select is status
+    fireEvent.change(statusSelect, { target: { value: 'uncoded' } });
 
     await waitFor(() => {
-      expect(screen.queryByText('1001')).not.toBeInTheDocument();
-      expect(screen.getByText('1002')).toBeInTheDocument();
+      expect(screen.queryByText('AN: 660001')).not.toBeInTheDocument();
+      expect(screen.getByText('AN: 660002')).toBeInTheDocument();
     });
 
-    // Test clicking "วิเคราะห์ DRG" button triggers callback
-    const optimizeButtons = screen.getAllByRole('button', { name: /วิเคราะห์ DRG/i });
-    fireEvent.click(optimizeButtons[0]);
-    expect(onSelectMock).toHaveBeenCalledWith('1002');
+    // Test clicking "ให้รหัส & วิเคราะห์" button
+    const optimizeBtn = screen.getByRole('button', { name: /ให้รหัส & วิเคราะห์/i });
+    fireEvent.click(optimizeBtn);
+    expect(onSelectMock).toHaveBeenCalledWith('660002');
   });
 
-  it('supports quick date preset buttons to change date range dynamically', async () => {
-    const onSelectMock = vi.fn();
+  it('handles fiscal year and month dropdown changes', async () => {
+    const fetchSpy = vi.spyOn(cmiApi, 'fetchCaseWorklist').mockResolvedValue(MOCK_CASES);
+
     render(
       <WorklistPage
-        onSelectCaseForOptimization={onSelectMock}
-        connectionConfig={null}
-        sessionStatus="demo"
+        onSelectCaseForOptimization={vi.fn()}
+        connectionConfig={{
+          apiUrl: 'https://test-his.hospital.in.th',
+          databaseType: 'postgresql',
+          appIdentifier: 'test',
+        }}
+        sessionStatus="connected"
       />,
     );
 
-    // Verify quick preset buttons exist
-    const thisMonthBtn = screen.getByRole('button', { name: /เดือนนี้/i });
-    const last30DaysBtn = screen.getByRole('button', { name: /30 วันล่าสุด/i });
-    expect(thisMonthBtn).toBeInTheDocument();
-    expect(last30DaysBtn).toBeInTheDocument();
-
-    // Click "เดือนนี้" and verify date range text updates
-    fireEvent.click(thisMonthBtn);
     await waitFor(() => {
-      expect(screen.getByText(/ช่วงวันที่ค้นหา:/i)).toBeInTheDocument();
-      expect(screen.getByText('1001')).toBeInTheDocument();
+      expect(screen.getByText('AN: 660001')).toBeInTheDocument();
     });
 
-    // Click "30 วันล่าสุด"
-    fireEvent.click(last30DaysBtn);
-    await waitFor(() => {
-      expect(screen.getByText(/ช่วงวันที่ค้นหา:/i)).toBeInTheDocument();
-    });
-  });
-
-  it('allows switching and viewing data by fiscal year and fiscal month', async () => {
-    const onSelectMock = vi.fn();
-    render(
-      <WorklistPage
-        onSelectCaseForOptimization={onSelectMock}
-        connectionConfig={null}
-        sessionStatus="demo"
-      />,
-    );
-
-    // Verify initial cases render first
-    await waitFor(() => {
-      expect(screen.getByText('1001')).toBeInTheDocument();
-    });
-
-    // Verify Fiscal Year buttons exist
-    const fyButtons = screen.getAllByRole('button', { name: /ปีงบประมาณ/i });
-    expect(fyButtons.length).toBeGreaterThanOrEqual(2);
-
-    // Click previous fiscal year button (e.g., 2568)
-    const prevFyBtn = fyButtons.find((btn) => btn.textContent?.includes('2568'));
-    if (prevFyBtn) {
-      fireEvent.click(prevFyBtn);
-      await waitFor(() => {
-        expect(screen.getByText('1007')).toBeInTheDocument();
-        expect(screen.getByText('1008')).toBeInTheDocument();
-        expect(screen.getAllByText(/ปีงบประมาณ 2568/i).length).toBeGreaterThanOrEqual(1);
-      });
-    }
-
-    // Click a fiscal month button (e.g. "ต.ค.")
-    const octBtn = screen.getByRole('button', { name: 'ต.ค.' });
-    expect(octBtn).toBeInTheDocument();
-    fireEvent.click(octBtn);
+    // Change Fiscal Month dropdown to October (month 1)
+    const monthSelect = screen.getAllByRole('combobox')[1];
+    fireEvent.change(monthSelect, { target: { value: '1' } });
 
     await waitFor(() => {
-      expect(screen.getByText(/เดือนตุลาคม/i)).toBeInTheDocument();
+      expect(fetchSpy).toHaveBeenCalled();
     });
   });
 });

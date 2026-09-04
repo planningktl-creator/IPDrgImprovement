@@ -3,14 +3,15 @@ import type { CmiCaseRow, WorklistQueryParams } from '@/cmi/caseContract';
 import { fetchCaseWorklist, type BmsConnectionConfig } from '@/services/cmiApi';
 import {
   Search,
-  Filter,
   RefreshCw,
   Sparkles,
   AlertCircle,
   Clock,
-  User,
   Activity,
   Calendar,
+  Database,
+  ShieldCheck,
+  Building,
 } from 'lucide-react';
 import {
   getThaiFiscalYear,
@@ -19,79 +20,98 @@ import {
   getFiscalMonthRange,
   THAI_FISCAL_MONTHS,
   getCurrentFiscalYearRange,
-  getFullFiscalYearRange,
-  getCurrentMonthRange,
-  getLastDaysRange,
-  getPreviousFiscalYearRange,
 } from '@/utils/dateUtils';
+import { auditClinicalCase } from '@/audit/clinicalAuditEngine';
 
 export interface WorklistPageProps {
   onSelectCaseForOptimization: (an: string) => void;
   connectionConfig: BmsConnectionConfig | null;
   sessionStatus: 'idle' | 'connected' | 'demo' | 'error';
+  onConnectSession?: (sid: string) => Promise<void>;
 }
 
 export const WorklistPage: React.FC<WorklistPageProps> = ({
   onSelectCaseForOptimization,
   connectionConfig,
   sessionStatus,
+  onConnectSession,
 }) => {
-  // Fiscal Year state management
+  // Fiscal Year & Month management
   const currentFiscalYear = useMemo(() => getThaiFiscalYear(), []);
-  const availableFiscalYears = useMemo(() => getRecentFiscalYears(5), []);
+  const availableFiscalYears = useMemo(() => getRecentFiscalYears(6), []);
 
   const [selectedFiscalYear, setSelectedFiscalYear] = useState<number>(currentFiscalYear);
   const [selectedFiscalMonth, setSelectedFiscalMonth] = useState<number | 'all'>('all');
-  const [isCurrentYearToDate, setIsCurrentYearToDate] = useState<boolean>(true);
+  const [showCustomDate, setShowCustomDate] = useState<boolean>(false);
 
-  // Dynamic Thai Fiscal Year default range (no hardcoded dates)
+  // Dynamic Date range based on Fiscal selections
   const initialDateRange = useMemo(() => getCurrentFiscalYearRange(), []);
   const [dstart, setDstart] = useState<string>(initialDateRange.dstart);
   const [dend, setDend] = useState<string>(initialDateRange.dend);
+
+  // Dropdown filter states
   const [statusFilter, setStatusFilter] = useState<'all' | 'uncoded' | 'coded'>('all');
-  const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedWard, setSelectedWard] = useState<string>('all');
+  const [selectedScheme, setSelectedScheme] = useState<string>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
 
-  const handleSelectFiscalYear = (year: number) => {
-    setSelectedFiscalYear(year);
-    setSelectedFiscalMonth('all');
-    const range = getFiscalYearRange(year, year !== currentFiscalYear || !isCurrentYearToDate);
-    setDstart(range.dstart);
-    setDend(range.dend);
-  };
+  // Manual Session Connect input state
+  const [sessionIdInput, setSessionIdInput] = useState<string>('');
+  const [connectingSession, setConnectingSession] = useState<boolean>(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
 
-  const handleSelectFiscalMonth = (month: number | 'all') => {
-    setSelectedFiscalMonth(month);
-    if (month === 'all') {
-      const range = getFiscalYearRange(selectedFiscalYear, selectedFiscalYear !== currentFiscalYear || !isCurrentYearToDate);
-      setDstart(range.dstart);
-      setDend(range.dend);
-    } else {
-      const range = getFiscalMonthRange(selectedFiscalYear, month);
-      setDstart(range.dstart);
-      setDend(range.dend);
-    }
-  };
-
-  const handleToggleCurrentYearScope = (toDate: boolean) => {
-    setIsCurrentYearToDate(toDate);
-    if (selectedFiscalMonth === 'all') {
-      const range = getFiscalYearRange(selectedFiscalYear, !toDate);
-      setDstart(range.dstart);
-      setDend(range.dend);
-    }
-  };
-
+  // Cases and loading states
   const [cases, setCases] = useState<CmiCaseRow[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  const handleFiscalYearChange = (year: number) => {
+    setSelectedFiscalYear(year);
+    setSelectedFiscalMonth('all');
+    const range = getFiscalYearRange(year, false);
+    setDstart(range.dstart);
+    setDend(range.dend);
+  };
+
+  const handleFiscalMonthChange = (monthVal: string) => {
+    if (monthVal === 'all') {
+      setSelectedFiscalMonth('all');
+      const range = getFiscalYearRange(selectedFiscalYear, false);
+      setDstart(range.dstart);
+      setDend(range.dend);
+    } else {
+      const m = parseInt(monthVal, 10);
+      setSelectedFiscalMonth(m);
+      const range = getFiscalMonthRange(selectedFiscalYear, m);
+      setDstart(range.dstart);
+      setDend(range.dend);
+    }
+  };
+
+  const handleManualConnect = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sessionIdInput.trim() || !onConnectSession) return;
+    setConnectingSession(true);
+    setSessionError(null);
+    try {
+      await onConnectSession(sessionIdInput.trim());
+    } catch (err) {
+      setSessionError((err as Error).message);
+    } finally {
+      setConnectingSession(false);
+    }
+  };
+
   const loadWorklist = useCallback(async () => {
+    if (sessionStatus !== 'connected' || !connectionConfig?.apiUrl) {
+      setCases([]);
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
     try {
-      const isDemo = sessionStatus !== 'connected';
       const params: WorklistQueryParams = {
         dstart,
         dend,
@@ -100,48 +120,39 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
         search: searchQuery,
       };
 
-      const result = await fetchCaseWorklist(params, connectionConfig || undefined, {
-        useDemoFallback: isDemo,
+      const result = await fetchCaseWorklist(params, connectionConfig, {
+        useDemoFallback: false,
       });
       setCases(result);
     } catch (err) {
-      setError((err as Error).message || 'เกิดข้อผิดพลาดในการโหลดทะเบียนผู้ป่วยใน');
+      setError((err as Error).message || 'เกิดข้อผิดพลาดในการโหลดทะเบียนเคสผู้ป่วยใน');
     } finally {
       setLoading(false);
     }
   }, [dstart, dend, selectedWard, statusFilter, searchQuery, connectionConfig, sessionStatus]);
 
   useEffect(() => {
-    let ignore = false;
-    const isDemo = sessionStatus !== 'connected';
-    const params: WorklistQueryParams = {
-      dstart,
-      dend,
-      ward: selectedWard !== 'all' ? selectedWard : undefined,
-      statusFilter,
-      search: searchQuery,
-    };
+    if (sessionStatus === 'connected' && connectionConfig?.apiUrl) {
+      loadWorklist();
+    } else {
+      setCases([]);
+    }
+  }, [loadWorklist, sessionStatus, connectionConfig]);
 
-    fetchCaseWorklist(params, connectionConfig || undefined, {
-      useDemoFallback: isDemo,
-    })
-      .then((result) => {
-        if (!ignore) {
-          setCases(result);
-        }
-      })
-      .catch((err) => {
-        if (!ignore) {
-          setError((err as Error).message || 'เกิดข้อผิดพลาดในการโหลดทะเบียนผู้ป่วยใน');
-        }
-      });
+  // Extract distinct wards from real cases for dynamic dropdown
+  const availableWards = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const c of cases) {
+      if (c.firstWard && c.firstWardName) {
+        map.set(c.firstWard, c.firstWardName);
+      } else if (c.lastWard && c.lastWardName) {
+        map.set(c.lastWard, c.lastWardName);
+      }
+    }
+    return Array.from(map.entries()).map(([code, name]) => ({ code, name }));
+  }, [cases]);
 
-    return () => {
-      ignore = true;
-    };
-  }, [dstart, dend, selectedWard, statusFilter, searchQuery, connectionConfig, sessionStatus]);
-
-  // Client-side filtering when in demo mode or for instant responsiveness
+  // Client-side filtering for fast instant responsiveness
   const filteredCases = useMemo(() => {
     return cases.filter((c) => {
       if (statusFilter === 'uncoded') {
@@ -152,6 +163,13 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
 
       if (selectedWard !== 'all') {
         if (c.firstWard !== selectedWard && c.lastWard !== selectedWard) return false;
+      }
+
+      if (selectedScheme !== 'all') {
+        const ptt = (c.pttypeName || c.pttype || '').toLowerCase();
+        if (selectedScheme === 'ucs' && !ptt.includes('ทอง') && !ptt.includes('ประกันสุขภาพ') && !ptt.includes('uc')) return false;
+        if (selectedScheme === 'ofc' && !ptt.includes('ข้าราชการ') && !ptt.includes('เบิก') && !ptt.includes('ofc')) return false;
+        if (selectedScheme === 'sss' && !ptt.includes('ประกันสังคม') && !ptt.includes('sss')) return false;
       }
 
       if (searchQuery.trim()) {
@@ -166,9 +184,9 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
 
       return true;
     });
-  }, [cases, statusFilter, selectedWard, searchQuery]);
+  }, [cases, statusFilter, selectedWard, selectedScheme, searchQuery]);
 
-  // Summary KPI Calculations
+  // Summary statistics
   const stats = useMemo(() => {
     const total = filteredCases.length;
     const uncoded = filteredCases.filter((c) => c.remark === 'ยังไม่ลงรหัสโรค' || !c.pdx).length;
@@ -176,59 +194,146 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
     const totalAdjrw = filteredCases.reduce((sum, c) => sum + (c.adjrw || 0), 0);
     const avgCmi = coded > 0 ? totalAdjrw / coded : 0;
     const totalIncome = filteredCases.reduce((sum, c) => sum + (c.income || 0), 0);
+    const estUcsRevenue = Math.round(totalAdjrw * 8350);
 
-    return { total, uncoded, coded, totalAdjrw, avgCmi, totalIncome };
+    return { total, uncoded, coded, totalAdjrw, avgCmi, totalIncome, estUcsRevenue };
   }, [filteredCases]);
 
-  // Extract unique wards for the dropdown
-  const wardOptions = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const c of cases) {
-      if (c.firstWard && c.firstWardName) map.set(c.firstWard, c.firstWardName);
-      if (c.lastWard && c.lastWardName) map.set(c.lastWard, c.lastWardName);
-    }
-    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [cases]);
-
   return (
-    <div style={{ maxWidth: '1440px', margin: '0 auto', padding: '24px 20px' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+    <div style={{ maxWidth: '1440px', margin: '0 auto', padding: '24px' }}>
+      {/* Top Header */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: '20px',
+        flexWrap: 'wrap',
+        gap: '16px',
+      }}>
         <div>
-          <h2 style={{ fontSize: '22px', fontWeight: '800', margin: 0, color: '#0f172a' }}>
-            ทะเบียนเคสผู้ป่วยใน (Inpatient Case Registry & Worklist)
-          </h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <h2 style={{ margin: 0, fontSize: '22px', fontWeight: '800', color: '#0f172a' }}>
+              ทะเบียนเคสผู้ป่วยใน (Inpatient Worklist)
+            </h2>
+            <span style={{
+              fontSize: '11px',
+              padding: '2px 8px',
+              backgroundColor: sessionStatus === 'connected' ? '#ecfdf5' : '#fef2f2',
+              color: sessionStatus === 'connected' ? '#047857' : '#b91c1c',
+              border: `1px solid ${sessionStatus === 'connected' ? '#a7f3d0' : '#fecaca'}`,
+              borderRadius: '6px',
+              fontWeight: '700',
+            }}>
+              {sessionStatus === 'connected' ? 'HIS Database Connected' : 'HIS Offline'}
+            </span>
+          </div>
           <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#64748b' }}>
-            สืบค้นและคัดกรองเคสผู้ป่วยในตามช่วงวันที่จำหน่าย เพื่อตรวจสอบสถานะการลงรหัสโรค และนำเข้าสู่ DRG Optimizer
+            ตรวจสอบสถานะการลงรหัสโรค ความถูกต้องตามเกณฑ์ สรท. และนำเข้าสู่ระบบ DRG Optimizer
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-          <button
-            type="button"
-            onClick={() => loadWorklist()}
-            disabled={loading}
-            style={{
-              backgroundColor: '#ffffff',
-              border: '1px solid #cbd5e1',
-              borderRadius: '8px',
-              padding: '8px 14px',
-              fontSize: '13px',
-              fontWeight: '600',
-              color: '#334155',
-              cursor: loading ? 'not-allowed' : 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-            }}
-          >
-            <RefreshCw size={15} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
-            {loading ? 'กำลังโหลด...' : 'รีเฟรชข้อมูล'}
-          </button>
-        </div>
+        {sessionStatus === 'connected' && (
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <button
+              type="button"
+              onClick={() => loadWorklist()}
+              disabled={loading}
+              style={{
+                backgroundColor: '#ffffff',
+                border: '1px solid #cbd5e1',
+                borderRadius: '8px',
+                padding: '8px 14px',
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#334155',
+                cursor: loading ? 'not-allowed' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+              }}
+            >
+              <RefreshCw size={15} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
+              {loading ? 'กำลังโหลด...' : 'รีเฟรชข้อมูล'}
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Fiscal Year Selection Panel */}
+      {/* Disconnected State / BMS Connection Prompt */}
+      {sessionStatus !== 'connected' && (
+        <div style={{
+          backgroundColor: '#ffffff',
+          borderRadius: '12px',
+          padding: '32px 24px',
+          border: '1px solid #e2e8f0',
+          marginBottom: '24px',
+          textAlign: 'center',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+        }}>
+          <div style={{
+            width: '56px',
+            height: '56px',
+            borderRadius: '16px',
+            backgroundColor: '#eff6ff',
+            color: '#2563eb',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            margin: '0 auto 16px auto',
+          }}>
+            <Database size={28} />
+          </div>
+          <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', fontWeight: '800', color: '#0f172a' }}>
+            พร้อมเชื่อมต่อฐานข้อมูลผู้ป่วยในจริง (HOSxP / BMS Cloud)
+          </h3>
+          <p style={{ margin: '0 auto 20px auto', maxWidth: '560px', fontSize: '13px', color: '#64748b', lineHeight: '1.6' }}>
+            ระบบนี้ทำงานโดยตรงกับฐานข้อมูล HIS ของโรงพยาบาล โดยไม่มีการจำลองข้อมูล (No Mock Data)
+            เพื่อความถูกต้องและปลอดภัย โปรดระบุ BMS Session ID หรือเปิดระบบผ่านลิงก์ของโรงพยาบาล
+          </p>
+
+          <form onSubmit={handleManualConnect} style={{ maxWidth: '460px', margin: '0 auto', display: 'flex', gap: '8px' }}>
+            <input
+              type="text"
+              placeholder="ระบุ BMS Session ID (เช่น d8f7a...)"
+              value={sessionIdInput}
+              onChange={(e) => setSessionIdInput(e.target.value)}
+              style={{
+                flex: 1,
+                padding: '10px 14px',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '13px',
+                outline: 'none',
+              }}
+            />
+            <button
+              type="submit"
+              disabled={connectingSession || !sessionIdInput.trim()}
+              style={{
+                backgroundColor: '#2563eb',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '8px',
+                padding: '10px 18px',
+                fontSize: '13px',
+                fontWeight: '700',
+                cursor: connectingSession ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {connectingSession ? 'กำลังเชื่อมต่อ...' : 'เชื่อมต่อ HIS'}
+            </button>
+          </form>
+
+          {sessionError && (
+            <div style={{ marginTop: '12px', color: '#dc2626', fontSize: '12px', fontWeight: '600' }}>
+              ⚠️ {sessionError}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Streamlined Dropdown Filter Toolbar */}
       <div style={{
         backgroundColor: '#ffffff',
         borderRadius: '12px',
@@ -237,649 +342,534 @@ export const WorklistPage: React.FC<WorklistPageProps> = ({
         marginBottom: '20px',
         boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
-          {/* Fiscal Year Buttons */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '13px', fontWeight: '700', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Calendar size={16} color="#2563eb" /> แสดงข้อมูลปีงบประมาณ:
-            </span>
-            {availableFiscalYears.map((year) => {
-              const isSelected = selectedFiscalYear === year;
-              const isCurrent = year === currentFiscalYear;
-              return (
-                <button
-                  key={year}
-                  type="button"
-                  onClick={() => handleSelectFiscalYear(year)}
-                  style={{
-                    padding: '6px 14px',
-                    borderRadius: '8px',
-                    fontSize: '13px',
-                    fontWeight: isSelected ? '700' : '500',
-                    border: isSelected ? '2px solid #2563eb' : '1px solid #cbd5e1',
-                    backgroundColor: isSelected ? '#eff6ff' : '#ffffff',
-                    color: isSelected ? '#1d4ed8' : '#334155',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    boxShadow: isSelected ? '0 1px 2px rgba(37,99,235,0.1)' : 'none',
-                    transition: 'all 0.15s ease',
-                  }}
-                >
-                  <span>ปีงบประมาณ {year}</span>
-                  {isCurrent && (
-                    <span style={{
-                      fontSize: '10px',
-                      backgroundColor: isSelected ? '#2563eb' : '#e2e8f0',
-                      color: isSelected ? '#ffffff' : '#475569',
-                      padding: '1px 5px',
-                      borderRadius: '4px',
-                      fontWeight: '600',
-                    }}>
-                      ปัจจุบัน
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Current Year Scope Toggle (when current FY and all months) */}
-          {selectedFiscalYear === currentFiscalYear && selectedFiscalMonth === 'all' && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', backgroundColor: '#f1f5f9', padding: '3px', borderRadius: '6px' }}>
-              <button
-                type="button"
-                onClick={() => handleToggleCurrentYearScope(true)}
-                style={{
-                  padding: '4px 8px',
-                  borderRadius: '4px',
-                  border: 'none',
-                  backgroundColor: isCurrentYearToDate ? '#ffffff' : 'transparent',
-                  color: isCurrentYearToDate ? '#1d4ed8' : '#64748b',
-                  cursor: 'pointer',
-                  fontWeight: isCurrentYearToDate ? '700' : '500',
-                  boxShadow: isCurrentYearToDate ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-                }}
-              >
-                ถึงปัจจุบัน
-              </button>
-              <button
-                type="button"
-                onClick={() => handleToggleCurrentYearScope(false)}
-                style={{
-                  padding: '4px 8px',
-                  borderRadius: '4px',
-                  border: 'none',
-                  backgroundColor: !isCurrentYearToDate ? '#ffffff' : 'transparent',
-                  color: !isCurrentYearToDate ? '#1d4ed8' : '#64748b',
-                  cursor: 'pointer',
-                  fontWeight: !isCurrentYearToDate ? '700' : '500',
-                  boxShadow: !isCurrentYearToDate ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-                }}
-              >
-                เต็มปีงบประมาณ
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Fiscal Month Selection Sub-bar */}
-        <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #f1f5f9' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '600', marginRight: '4px' }}>
-              เดือนในรอบปีงบ {selectedFiscalYear}:
-            </span>
-            <button
-              type="button"
-              onClick={() => handleSelectFiscalMonth('all')}
-              style={{
-                padding: '4px 10px',
-                borderRadius: '6px',
-                fontSize: '12px',
-                fontWeight: selectedFiscalMonth === 'all' ? '700' : '500',
-                border: 'none',
-                cursor: 'pointer',
-                backgroundColor: selectedFiscalMonth === 'all' ? '#1e293b' : '#f1f5f9',
-                color: selectedFiscalMonth === 'all' ? '#ffffff' : '#475569',
-              }}
-            >
-              ทั้งหมด (12 เดือน)
-            </button>
-
-            {THAI_FISCAL_MONTHS.map((m) => {
-              const isMonthSelected = selectedFiscalMonth === m.fiscalMonth;
-              return (
-                <button
-                  key={m.fiscalMonth}
-                  type="button"
-                  onClick={() => handleSelectFiscalMonth(m.fiscalMonth)}
-                  style={{
-                    padding: '4px 8px',
-                    borderRadius: '6px',
-                    fontSize: '12px',
-                    fontWeight: isMonthSelected ? '700' : '500',
-                    border: 'none',
-                    cursor: 'pointer',
-                    backgroundColor: isMonthSelected ? '#2563eb' : '#f8fafc',
-                    color: isMonthSelected ? '#ffffff' : '#475569',
-                  }}
-                >
-                  {m.name}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* Active Scope Summary Banner */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
-        <div style={{ fontSize: '14px', fontWeight: '700', color: '#1e293b' }}>
-          สรุปสถิติ: <span style={{ color: '#2563eb' }}>ปีงบประมาณ {selectedFiscalYear}</span>
-          {selectedFiscalMonth !== 'all' && (
-            <span style={{ color: '#059669', marginLeft: '6px' }}>
-              (เดือน{THAI_FISCAL_MONTHS.find((m) => m.fiscalMonth === selectedFiscalMonth)?.fullName})
-            </span>
-          )}
-        </div>
-        <div style={{ fontSize: '12px', color: '#64748b' }}>
-          ช่วงวันจำหน่าย: <strong>{dstart}</strong> ถึง <strong>{dend}</strong>
-        </div>
-      </div>
-
-      {/* KPI Cards — Executive Metric Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', marginBottom: '20px' }}>
-        <div className="kpi-metric-card kpi-blue">
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+          gap: '14px',
+          alignItems: 'flex-end',
+        }}>
+          {/* Dropdown 1: Fiscal Year */}
           <div>
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <User size={15} color="#2563eb" /> จำนวนเคสทั้งหมด
-            </div>
-            <div style={{ fontSize: '26px', fontWeight: '800', color: '#0f172a', marginTop: '8px' }}>
-              {stats.total.toLocaleString()} <span style={{ fontSize: '13px', fontWeight: '600', color: '#64748b' }}>เคส</span>
-            </div>
-          </div>
-          <div style={{ fontSize: '11px', color: '#64748b', marginTop: '10px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <span>ยอดรับรักษาผู้ป่วยในสะสม</span>
-          </div>
-        </div>
-
-        <div className="kpi-metric-card kpi-amber">
-          <div>
-            <div style={{ fontSize: '12px', color: '#b45309', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{
-                width: '7px',
-                height: '7px',
-                borderRadius: '50%',
-                backgroundColor: '#f59e0b',
-                display: 'inline-block',
-              }} className="animate-pulse-dot" />
-              <AlertCircle size={15} color="#d97706" /> ยังไม่ลงรหัสโรค (เป้าหมายทบทวน)
-            </div>
-            <div style={{ fontSize: '26px', fontWeight: '800', color: '#b45309', marginTop: '8px' }}>
-              {stats.uncoded.toLocaleString()} <span style={{ fontSize: '13px', fontWeight: '600', color: '#b45309' }}>เคส</span>
-            </div>
-          </div>
-          <div style={{ fontSize: '11px', color: '#92400e', marginTop: '10px', fontWeight: '600' }}>
-            ⚠ รอแพทย์และ Coder ให้รหัสโรคสมบูรณ์
-          </div>
-        </div>
-
-        <div className="kpi-metric-card kpi-emerald">
-          <div>
-            <div style={{ fontSize: '12px', color: '#047857', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Activity size={15} color="#059669" /> CMI เฉลี่ย (เคสที่ลงรหัสแล้ว)
-            </div>
-            <div style={{ fontSize: '26px', fontWeight: '800', color: '#059669', marginTop: '8px' }}>
-              {stats.avgCmi.toFixed(4)}
-            </div>
-          </div>
-          <div style={{ fontSize: '11px', color: '#047857', marginTop: '10px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <span>จากเคสที่ลงรหัสแล้ว {stats.coded} เคส</span>
-          </div>
-        </div>
-
-        <div className="kpi-metric-card kpi-purple">
-          <div>
-            <div style={{ fontSize: '12px', color: '#4338ca', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Clock size={15} color="#4f46e5" /> ผลรวม AdjRW
-            </div>
-            <div style={{ fontSize: '26px', fontWeight: '800', color: '#1e1b4b', marginTop: '8px' }}>
-              {stats.totalAdjrw.toFixed(4)}
-            </div>
-          </div>
-          <div style={{ fontSize: '11px', color: '#4338ca', marginTop: '10px', fontWeight: '600' }}>
-            ประมาณการชดเชย: ฿{(stats.totalAdjrw * 8350).toLocaleString('th-TH', { maximumFractionDigits: 0 })}
-          </div>
-        </div>
-      </div>
-
-      {/* Filter Toolbar */}
-      <div className="card-panel" style={{ padding: '20px', marginBottom: '20px' }}>
-        {/* Quick Date Presets Bar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '12px', fontWeight: '700', color: '#475569', display: 'flex', alignItems: 'center', gap: '5px' }}>
-            <Calendar size={14} color="#2563eb" /> ช่วงเวลาด่วน:
-          </span>
-          <button
-            type="button"
-            className="btn-modern btn-ghost-neutral"
-            onClick={() => {
-              const r = getCurrentFiscalYearRange();
-              setDstart(r.dstart);
-              setDend(r.dend);
-            }}
-            style={{ padding: '5px 12px', fontSize: '12px' }}
-          >
-            ปีงบประมาณนี้ (ถึงวันนี้)
-          </button>
-          <button
-            type="button"
-            className="btn-modern btn-ghost-neutral"
-            onClick={() => {
-              const r = getCurrentMonthRange();
-              setDstart(r.dstart);
-              setDend(r.dend);
-            }}
-            style={{ padding: '5px 12px', fontSize: '12px' }}
-          >
-            เดือนนี้
-          </button>
-          <button
-            type="button"
-            className="btn-modern btn-ghost-neutral"
-            onClick={() => {
-              const r = getLastDaysRange(30);
-              setDstart(r.dstart);
-              setDend(r.dend);
-            }}
-            style={{ padding: '5px 12px', fontSize: '12px' }}
-          >
-            30 วันล่าสุด
-          </button>
-          <button
-            type="button"
-            className="btn-modern btn-ghost-neutral"
-            onClick={() => {
-              const r = getPreviousFiscalYearRange();
-              setDstart(r.dstart);
-              setDend(r.dend);
-            }}
-            style={{ padding: '5px 12px', fontSize: '12px' }}
-          >
-            ปีงบก่อนหน้า
-          </button>
-          <button
-            type="button"
-            className="btn-modern btn-ghost-neutral"
-            onClick={() => {
-              const r = getFullFiscalYearRange();
-              setDstart(r.dstart);
-              setDend(r.dend);
-            }}
-            style={{ padding: '5px 12px', fontSize: '12px' }}
-          >
-            ปีงบเต็มปี (ต.ค. - ก.ย.)
-          </button>
-        </div>
-
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', alignItems: 'flex-end' }}>
-          {/* Date Range Controls */}
-          <div>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '6px' }}>
-              วันที่จำหน่ายเริ่มต้น (dstart)
-            </label>
-            <input
-              type="date"
-              value={dstart}
-              onChange={(e) => setDstart(e.target.value)}
-              style={{
-                padding: '9px 12px',
-                borderRadius: '8px',
-                border: '1px solid #cbd5e1',
-                fontSize: '13px',
-                backgroundColor: '#ffffff',
-                outline: 'none',
-              }}
-            />
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '6px' }}>
-              วันที่จำหน่ายสิ้นสุด (dend)
-            </label>
-            <input
-              type="date"
-              value={dend}
-              onChange={(e) => setDend(e.target.value)}
-              style={{
-                padding: '9px 12px',
-                borderRadius: '8px',
-                border: '1px solid #cbd5e1',
-                fontSize: '13px',
-                backgroundColor: '#ffffff',
-                outline: 'none',
-              }}
-            />
-          </div>
-
-          {/* Ward Selector */}
-          <div>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '6px' }}>
-              หอผู้ป่วย / วอร์ด (Ward)
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <Calendar size={13} color="#2563eb" /> ปีงบประมาณ:
+              </span>
             </label>
             <select
-              value={selectedWard}
-              onChange={(e) => setSelectedWard(e.target.value)}
+              value={selectedFiscalYear}
+              onChange={(e) => handleFiscalYearChange(parseInt(e.target.value, 10))}
               style={{
-                padding: '9px 14px',
+                width: '100%',
+                padding: '8px 12px',
                 borderRadius: '8px',
                 border: '1px solid #cbd5e1',
                 fontSize: '13px',
+                fontWeight: '600',
+                color: '#0f172a',
                 backgroundColor: '#ffffff',
-                minWidth: '180px',
+                cursor: 'pointer',
                 outline: 'none',
               }}
             >
-              <option value="all">ทุกวอร์ด (All Wards)</option>
-              {wardOptions.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name} ({w.id})
+              {availableFiscalYears.map((year) => (
+                <option key={year} value={year}>
+                  ปีงบประมาณ {year} {year === currentFiscalYear ? '(ปัจจุบัน)' : ''}
                 </option>
               ))}
             </select>
           </div>
 
-          {/* Search Box */}
-          <div style={{ flex: 1, minWidth: '240px' }}>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#475569', marginBottom: '6px' }}>
-              ค้นหาเคส (AN, HN, ชื่อผู้ป่วย, PDx)
+          {/* Dropdown 2: Fiscal Month */}
+          <div>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <Clock size={13} color="#059669" /> เดือนในรอบปีงบ:
+              </span>
             </label>
-            <div style={{ position: 'relative' }}>
-              <input
-                type="text"
-                placeholder="พิมพ์ AN หรือชื่อโรคเพื่อค้นหา..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '9px 14px 9px 36px',
-                  borderRadius: '8px',
-                  border: '1px solid #cbd5e1',
-                  fontSize: '13px',
-                  outline: 'none',
-                }}
-              />
-              <Search
-                size={16}
-                style={{ position: 'absolute', left: '12px', top: '11px', color: '#94a3b8' }}
-              />
-            </div>
+            <select
+              value={selectedFiscalMonth}
+              onChange={(e) => handleFiscalMonthChange(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '13px',
+                fontWeight: '500',
+                color: '#0f172a',
+                backgroundColor: '#ffffff',
+                cursor: 'pointer',
+                outline: 'none',
+              }}
+            >
+              <option value="all">ทั้งปีงบประมาณ (12 เดือน)</option>
+              {THAI_FISCAL_MONTHS.map((m) => (
+                <option key={m.fiscalMonth} value={m.fiscalMonth}>
+                  เดือน {m.fiscalMonth}: {m.fullName} ({m.name})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Dropdown 3: Ward */}
+          <div>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <Building size={13} color="#8b5cf6" /> หอผู้ป่วย:
+              </span>
+            </label>
+            <select
+              value={selectedWard}
+              onChange={(e) => setSelectedWard(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '13px',
+                color: '#0f172a',
+                backgroundColor: '#ffffff',
+                cursor: 'pointer',
+                outline: 'none',
+              }}
+            >
+              <option value="all">ทุกหอผู้ป่วย</option>
+              {availableWards.map((w) => (
+                <option key={w.code} value={w.code}>
+                  [{w.code}] {w.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Dropdown 4: Coding Status */}
+          <div>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <Activity size={13} color="#d97706" /> สถานะการลงรหัส:
+              </span>
+            </label>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as 'all' | 'uncoded' | 'coded')}
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '13px',
+                fontWeight: '500',
+                color: '#0f172a',
+                backgroundColor: '#ffffff',
+                cursor: 'pointer',
+                outline: 'none',
+              }}
+            >
+              <option value="all">สถานะทั้งหมด</option>
+              <option value="uncoded">ยังไม่ลงรหัสโรค (Uncoded / DRG ว่าง)</option>
+              <option value="coded">ลงรหัสโรคแล้ว (Coded / มี DRG แล้ว)</option>
+            </select>
+          </div>
+
+          {/* Dropdown 5: Scheme / Pttype */}
+          <div>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <ShieldCheck size={13} color="#0284c7" /> สิทธิการรักษา:
+              </span>
+            </label>
+            <select
+              value={selectedScheme}
+              onChange={(e) => setSelectedScheme(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '8px 12px',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '13px',
+                color: '#0f172a',
+                backgroundColor: '#ffffff',
+                cursor: 'pointer',
+                outline: 'none',
+              }}
+            >
+              <option value="all">ทุกสิทธิการรักษา</option>
+              <option value="ucs">บัตรทอง (UCS 8,350 ฿)</option>
+              <option value="ofc">ข้าราชการ (OFC 7,500 ฿)</option>
+              <option value="sss">ประกันสังคม (SSS 11,000-12,000 ฿)</option>
+            </select>
           </div>
         </div>
 
-        {/* Filter Badges Bar */}
-        <div style={{ display: 'flex', gap: '8px', marginTop: '16px', paddingTop: '16px', borderTop: '1px solid #f1f5f9', alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '5px' }}>
-            <Filter size={14} /> สถานะรหัสโรค:
-          </span>
-          <button
-            type="button"
-            className="btn-modern"
-            onClick={() => setStatusFilter('all')}
-            style={{
-              padding: '4px 12px',
-              borderRadius: '20px',
-              fontSize: '12px',
-              backgroundColor: statusFilter === 'all' ? '#2563eb' : '#f1f5f9',
-              color: statusFilter === 'all' ? '#ffffff' : '#475569',
-            }}
-          >
-            ทั้งหมด ({stats.total})
-          </button>
-          <button
-            type="button"
-            className="btn-modern"
-            onClick={() => setStatusFilter('uncoded')}
-            style={{
-              padding: '4px 12px',
-              borderRadius: '20px',
-              fontSize: '12px',
-              backgroundColor: statusFilter === 'uncoded' ? '#d97706' : '#fef3c7',
-              color: statusFilter === 'uncoded' ? '#ffffff' : '#92400e',
-              boxShadow: statusFilter === 'uncoded' ? '0 1px 3px rgba(217,119,6,0.2)' : 'none',
-            }}
-          >
-            ยังไม่ลงรหัสโรค ({stats.uncoded})
-          </button>
-          <button
-            type="button"
-            className="btn-modern"
-            onClick={() => setStatusFilter('coded')}
-            style={{
-              padding: '4px 12px',
-              borderRadius: '20px',
-              fontSize: '12px',
-              backgroundColor: statusFilter === 'coded' ? '#059669' : '#dcfce7',
-              color: statusFilter === 'coded' ? '#ffffff' : '#166534',
-            }}
-          >
-            ลงรหัสแล้ว ({stats.coded})
-          </button>
+        {/* Search & Date info bar */}
+        <div style={{
+          marginTop: '14px',
+          paddingTop: '12px',
+          borderTop: '1px solid #f1f5f9',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '12px',
+        }}>
+          {/* Search box */}
+          <div style={{ position: 'relative', flex: 1, minWidth: '240px', maxWidth: '420px' }}>
+            <Search size={15} color="#94a3b8" style={{ position: 'absolute', left: '10px', top: '10px' }} />
+            <input
+              type="text"
+              placeholder="ค้นหา AN, HN, ชื่อผู้ป่วย, หรือรหัสโรค PDx..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '7px 12px 7px 32px',
+                borderRadius: '8px',
+                border: '1px solid #cbd5e1',
+                fontSize: '13px',
+                outline: 'none',
+              }}
+            />
+          </div>
 
-          <span style={{ marginLeft: 'auto', fontSize: '12px', color: '#64748b', fontWeight: '600', backgroundColor: '#f8fafc', padding: '4px 10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-            ช่วงวันที่ค้นหา: {dstart} ถึง {dend}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '12px', color: '#64748b' }}>
+            <span>
+              ช่วงวันที่สืบค้น: <strong>{dstart}</strong> ถึง <strong>{dend}</strong>
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowCustomDate(!showCustomDate)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: '#2563eb',
+                fontSize: '12px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                textDecoration: 'underline',
+              }}
+            >
+              {showCustomDate ? 'ซ่อนการระบุวันที่เอง' : 'ระบุวันที่เอง'}
+            </button>
+          </div>
+        </div>
+
+        {/* Collapsible custom date inputs */}
+        {showCustomDate && (
+          <div style={{
+            marginTop: '12px',
+            padding: '12px',
+            backgroundColor: '#f8fafc',
+            borderRadius: '8px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            flexWrap: 'wrap',
+            fontSize: '12px',
+          }}>
+            <span>ตั้งแต่วันที่:</span>
+            <input
+              type="date"
+              value={dstart}
+              onChange={(e) => setDstart(e.target.value)}
+              style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+            />
+            <span>ถึงวันที่:</span>
+            <input
+              type="date"
+              value={dend}
+              onChange={(e) => setDend(e.target.value)}
+              style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* KPI Cards */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+        gap: '14px',
+        marginBottom: '20px',
+      }}>
+        <div style={{ backgroundColor: '#ffffff', borderRadius: '10px', padding: '14px 18px', border: '1px solid #e2e8f0' }}>
+          <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>เคสผู้ป่วยทั้งหมด</div>
+          <div style={{ fontSize: '22px', fontWeight: '800', color: '#0f172a', marginTop: '4px' }}>
+            {stats.total.toLocaleString()} ราย
+          </div>
+        </div>
+
+        <div style={{ backgroundColor: '#ffffff', borderRadius: '10px', padding: '14px 18px', border: '1px solid #fecaca' }}>
+          <div style={{ fontSize: '12px', color: '#dc2626', fontWeight: '700' }}>ยังไม่ลงรหัสโรค (Uncoded)</div>
+          <div style={{ fontSize: '22px', fontWeight: '800', color: '#dc2626', marginTop: '4px' }}>
+            {stats.uncoded.toLocaleString()} ราย
+          </div>
+        </div>
+
+        <div style={{ backgroundColor: '#ffffff', borderRadius: '10px', padding: '14px 18px', border: '1px solid #e2e8f0' }}>
+          <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>ลงรหัสโรคแล้ว (Coded)</div>
+          <div style={{ fontSize: '22px', fontWeight: '800', color: '#16a34a', marginTop: '4px' }}>
+            {stats.coded.toLocaleString()} ราย
+          </div>
+        </div>
+
+        <div style={{ backgroundColor: '#ffffff', borderRadius: '10px', padding: '14px 18px', border: '1px solid #e2e8f0' }}>
+          <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>ค่าเฉลี่ย CMI (Case Mix Index)</div>
+          <div style={{ fontSize: '22px', fontWeight: '800', color: '#2563eb', marginTop: '4px' }}>
+            {stats.avgCmi.toFixed(4)}
+          </div>
+        </div>
+
+        <div style={{ backgroundColor: '#ffffff', borderRadius: '10px', padding: '14px 18px', border: '1px solid #e2e8f0' }}>
+          <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>ประมาณการรายได้ชดเชย UCS</div>
+          <div style={{ fontSize: '20px', fontWeight: '800', color: '#0f172a', marginTop: '4px' }}>
+            ฿{stats.estUcsRevenue.toLocaleString()}
+          </div>
         </div>
       </div>
 
-      {/* Error Message */}
-      {error && (
-        <div style={{ backgroundColor: '#fef2f2', border: '1px solid #fecaca', borderRadius: '10px', padding: '14px 18px', color: '#991b1b', fontSize: '13px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <AlertCircle size={18} color="#dc2626" />
-          <span><strong>ข้อผิดพลาด:</strong> {error}</span>
-        </div>
-      )}
+      {/* Case Table / Empty State */}
+      <div style={{
+        backgroundColor: '#ffffff',
+        borderRadius: '12px',
+        border: '1px solid #e2e8f0',
+        overflow: 'hidden',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+      }}>
+        {loading ? (
+          <div style={{ padding: '60px', textAlign: 'center', color: '#64748b' }}>
+            <RefreshCw size={32} style={{ animation: 'spin 1s linear infinite', margin: '0 auto 12px auto' }} />
+            <div>กำลังสืบค้นข้อมูลผู้ป่วยในจากระบบ HIS...</div>
+          </div>
+        ) : error ? (
+          <div style={{ padding: '40px', textAlign: 'center', color: '#dc2626' }}>
+            <AlertCircle size={36} style={{ margin: '0 auto 12px auto' }} />
+            <div style={{ fontWeight: '700', fontSize: '15px' }}>ไม่สามารถดึงข้อมูลได้</div>
+            <div style={{ fontSize: '13px', marginTop: '4px' }}>{error}</div>
+          </div>
+        ) : filteredCases.length === 0 ? (
+          <div style={{ padding: '60px 24px', textAlign: 'center', color: '#64748b' }}>
+            <div style={{
+              width: '52px',
+              height: '52px',
+              borderRadius: '50%',
+              backgroundColor: '#f1f5f9',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto 16px auto',
+              color: '#94a3b8',
+            }}>
+              <Search size={26} />
+            </div>
+            <h4 style={{ margin: '0 0 6px 0', fontSize: '16px', fontWeight: '700', color: '#1e293b' }}>
+              {sessionStatus === 'connected' ? 'ไม่พบข้อมูลผู้ป่วยใน' : 'ยังไม่ได้เชื่อมต่อระบบ HIS'}
+            </h4>
+            <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>
+              {sessionStatus === 'connected'
+                ? 'ไม่พบข้อมูลผู้ป่วยตามปีงบประมาณ เดือน หรือเงื่อนไขตัวกรองที่เลือก ลองเปลี่ยนเดือนหรือช่วงวันที่'
+                : 'กรุณาเชื่อมต่อ BMS Session เพื่อดึงข้อมูลจริงจากโรงพยาบาล'}
+            </p>
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
+              <thead>
+                <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569', fontWeight: '700' }}>
+                  <th style={{ padding: '12px 16px' }}>AN / HN</th>
+                  <th style={{ padding: '12px 16px' }}>ผู้ป่วย</th>
+                  <th style={{ padding: '12px 16px' }}>หอผู้ป่วย</th>
+                  <th style={{ padding: '12px 16px' }}>วันจำหน่าย / LOS</th>
+                  <th style={{ padding: '12px 16px' }}>รหัสโรค (PDx / SDx)</th>
+                  <th style={{ padding: '12px 16px' }}>DRG / AdjRW</th>
+                  <th style={{ padding: '12px 16px' }}>สถานะและความถูกต้อง</th>
+                  <th style={{ padding: '12px 16px', textAlign: 'center' }}>การดำเนินการ</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredCases.map((c) => {
+                  const isUncoded = c.remark === 'ยังไม่ลงรหัสโรค' || !c.pdx;
+                  const auditRes = auditClinicalCase({
+                    an: c.an || '',
+                    age: c.age,
+                    sex: c.sex,
+                    los: c.los ?? 0,
+                    pdx: c.pdx,
+                    sdx: [c.sdx1, c.sdx2, c.sdx3, c.sdx4].filter(Boolean) as string[],
+                    proc: [c.proc1, c.proc2, c.proc3].filter(Boolean) as string[],
+                    rw: c.rw,
+                    adjrw: c.adjrw,
+                  });
 
-      {/* Cases Table */}
-      <div className="modern-table-wrap">
-        <table className="modern-table">
-          <thead>
-            <tr>
-              <th>AN / HN</th>
-              <th>ผู้ป่วย (Masked)</th>
-              <th>หอผู้ป่วย (Ward)</th>
-              <th>วันจำหน่าย (LOS)</th>
-              <th>วินิจฉัยหลัก (PDx)</th>
-              <th>วินิจฉัยร่วม (SDx 1..12)</th>
-              <th>หัตถการ (Proc)</th>
-              <th>DRG / AdjRW</th>
-              <th>สถานะ</th>
-              <th style={{ textAlign: 'center' }}>การกระทำ</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredCases.length > 0 ? (
-              filteredCases.map((c) => {
-                const isUncoded = c.remark === 'ยังไม่ลงรหัสโรค' || !c.pdx;
-                const allSdx = [
-                  c.sdx1, c.sdx2, c.sdx3, c.sdx4,
-                  c.sdx5, c.sdx6, c.sdx7, c.sdx8,
-                  c.sdx9, c.sdx10, c.sdx11, c.sdx12,
-                ].filter(Boolean);
+                  return (
+                    <tr
+                      key={c.an}
+                      style={{
+                        borderBottom: '1px solid #f1f5f9',
+                        transition: 'background-color 0.15s ease',
+                      }}
+                      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f8fafc')}
+                      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#ffffff')}
+                    >
+                      {/* AN / HN */}
+                      <td style={{ padding: '12px 16px' }}>
+                        <div style={{ fontWeight: '700', color: '#0f172a' }}>AN: {c.an}</div>
+                        <div style={{ fontSize: '11px', color: '#64748b' }}>HN: {c.hn}</div>
+                      </td>
 
-                const allProc = [
-                  c.proc1, c.proc2, c.proc3, c.proc4,
-                  c.proc5, c.proc6, c.proc7, c.proc8,
-                  c.proc9, c.proc10, c.proc11, c.proc12,
-                ].filter(Boolean);
-
-                return (
-                  <tr
-                    key={c.an}
-                    className={isUncoded ? 'row-uncoded' : ''}
-                  >
-                    <td>
-                      <div style={{ fontWeight: '700', color: '#0f172a', fontSize: '14px', letterSpacing: '0.02em' }}>
-                        {c.an}
-                      </div>
-                      <div style={{ fontSize: '11px', color: '#64748b' }}>HN: {c.hn || '-'}</div>
-                    </td>
-
-                    <td>
-                      <div style={{ fontWeight: '600', color: '#1e293b' }}>
-                        {c.ptname || 'ไม่ระบุชื่อ'}
-                      </div>
-                      <div style={{ fontSize: '11px', color: '#64748b', display: 'flex', gap: '4px', alignItems: 'center', marginTop: '2px' }}>
-                        <span style={{ backgroundColor: '#f1f5f9', padding: '1px 5px', borderRadius: '4px' }}>{c.sex || '-'}</span>
-                        <span>&bull;</span>
-                        <span>{c.age != null ? `${c.age} ปี` : '-'}</span>
-                      </div>
-                    </td>
-
-                    <td>
-                      <div style={{ color: '#0f172a', fontWeight: '600' }}>
-                        {c.lastWardName || c.firstWardName || '-'}
-                      </div>
-                      {c.firstWardName && c.lastWardName && c.firstWardName !== c.lastWardName && (
-                        <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
-                          แรกรับ: {c.firstWardName}
+                      {/* Patient Name */}
+                      <td style={{ padding: '12px 16px' }}>
+                        <div style={{ fontWeight: '600', color: '#1e293b' }}>
+                          {c.ptname || 'ไม่ระบุชื่อ'}
                         </div>
-                      )}
-                    </td>
-
-                    <td>
-                      <div style={{ color: '#0f172a', fontWeight: '500' }}>{c.dchdate || '-'}</div>
-                      <div style={{ fontSize: '11px', color: '#2563eb', fontWeight: '600', marginTop: '2px' }}>
-                        {c.los != null ? `${c.los} วันนอน` : '-'}
-                      </div>
-                    </td>
-
-                    <td>
-                      {c.pdx ? (
-                        <span className="chip-code chip-pdx">
-                          {c.pdx}
-                        </span>
-                      ) : (
-                        <span style={{ color: '#d97706', fontWeight: '700', fontSize: '13px' }}>-</span>
-                      )}
-                    </td>
-
-                    <td style={{ maxWidth: '220px' }}>
-                      {allSdx.length > 0 ? (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                          {allSdx.slice(0, 4).map((s, sIdx) => (
-                            <span key={sIdx} className="chip-code chip-sdx">
-                              {s}
-                            </span>
-                          ))}
-                          {allSdx.length > 4 && (
-                            <span style={{ fontSize: '11px', color: '#64748b', alignSelf: 'center', fontWeight: '600', backgroundColor: '#f1f5f9', padding: '2px 5px', borderRadius: '4px' }}>
-                              +{allSdx.length - 4}
-                            </span>
-                          )}
+                        <div style={{ fontSize: '11px', color: '#64748b' }}>
+                          {c.sex || '-'} • อายุ {c.age ?? '-'} ปี
                         </div>
-                      ) : (
-                        <span style={{ color: '#94a3b8', fontSize: '12px' }}>-</span>
-                      )}
-                    </td>
+                      </td>
 
-                    <td style={{ maxWidth: '180px' }}>
-                      {allProc.length > 0 ? (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                          {allProc.slice(0, 3).map((p, pIdx) => (
-                            <span key={pIdx} className="chip-code" style={{ backgroundColor: '#f8fafc', color: '#475569', border: '1px solid #cbd5e1' }}>
-                              {p}
-                            </span>
-                          ))}
-                          {allProc.length > 3 && (
-                            <span style={{ fontSize: '11px', color: '#64748b', alignSelf: 'center', fontWeight: '600', backgroundColor: '#f1f5f9', padding: '2px 5px', borderRadius: '4px' }}>
-                              +{allProc.length - 3}
-                            </span>
-                          )}
+                      {/* Ward */}
+                      <td style={{ padding: '12px 16px' }}>
+                        <div style={{ color: '#334155' }}>
+                          {c.firstWardName || c.lastWardName || c.firstWard || '-'}
                         </div>
-                      ) : (
-                        <span style={{ color: '#94a3b8', fontSize: '12px' }}>-</span>
-                      )}
-                    </td>
+                        <div style={{ fontSize: '11px', color: '#64748b' }}>
+                          {c.pttypeName || c.pttype || '-'}
+                        </div>
+                      </td>
 
-                    <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span className="chip-code chip-drg">
-                          {c.drg || '-'}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: '12px', color: '#059669', fontWeight: '700', marginTop: '3px' }}>
-                        AdjRW: {c.adjrw != null ? c.adjrw.toFixed(4) : '-'}
-                      </div>
-                    </td>
+                      {/* Discharge Date & LOS */}
+                      <td style={{ padding: '12px 16px' }}>
+                        <div>{c.dchdate || '-'}</div>
+                        <div style={{ fontSize: '11px', color: '#64748b' }}>
+                          วันนอน: <strong>{c.los} วัน</strong>
+                        </div>
+                      </td>
 
-                    <td>
-                      {isUncoded ? (
-                        <span style={{
-                          backgroundColor: '#fef3c7',
-                          color: '#b45309',
-                          padding: '3px 10px',
-                          borderRadius: '12px',
-                          fontSize: '11px',
-                          fontWeight: '700',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                          border: '1px solid #fde68a',
-                        }}>
-                          <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#f59e0b' }} className="animate-pulse-dot" />
-                          ยังไม่ลงรหัสโรค
-                        </span>
-                      ) : (
-                        <span style={{
-                          backgroundColor: '#dcfce7',
-                          color: '#15803d',
-                          padding: '3px 10px',
-                          borderRadius: '12px',
-                          fontSize: '11px',
-                          fontWeight: '600',
-                          display: 'inline-block',
-                          border: '1px solid #bbf7d0',
-                        }}>
-                          ลงรหัสแล้ว
-                        </span>
-                      )}
-                    </td>
+                      {/* Diagnoses */}
+                      <td style={{ padding: '12px 16px' }}>
+                        {isUncoded ? (
+                          <span style={{
+                            fontSize: '11px',
+                            color: '#dc2626',
+                            backgroundColor: '#fef2f2',
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            fontWeight: '600',
+                          }}>
+                            ยังไม่ลงรหัสโรค
+                          </span>
+                        ) : (
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                              <span style={{ fontSize: '10px', color: '#64748b', fontWeight: '700' }}>PDX:</span>
+                              <span style={{
+                                fontWeight: '700',
+                                color: '#1e40af',
+                                backgroundColor: '#eff6ff',
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                              }}>
+                                {c.pdx}
+                              </span>
+                            </div>
+                            {(c.sdx1 || c.sdx2) && (
+                              <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                                SDx: {[c.sdx1, c.sdx2, c.sdx3].filter(Boolean).join(', ')}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </td>
 
-                    <td style={{ textAlign: 'center' }}>
-                      <button
-                        type="button"
-                        className="btn-modern btn-primary-gradient"
-                        onClick={() => onSelectCaseForOptimization(c.an || '')}
-                        style={{ padding: '6px 14px', fontSize: '12px' }}
-                      >
-                        <Sparkles size={14} />
-                        วิเคราะห์ DRG
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })
-            ) : (
-              <tr>
-                <td colSpan={10} style={{ padding: '48px', textAlign: 'center', color: '#64748b' }}>
-                  {loading ? (
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                      <RefreshCw size={18} style={{ animation: 'spin 1s linear infinite', color: '#2563eb' }} />
-                      <span>กำลังสืบค้นข้อมูลจากฐานข้อมูล...</span>
-                    </div>
-                  ) : (
-                    'ไม่พบเคสผู้ป่วยตามเงื่อนไขที่เลือก'
-                  )}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+                      {/* DRG & AdjRW */}
+                      <td style={{ padding: '12px 16px' }}>
+                        {c.drg ? (
+                          <div>
+                            <div style={{ fontWeight: '700', color: '#0f172a' }}>DRG: {c.drg}</div>
+                            <div style={{ fontSize: '11px', color: '#059669', fontWeight: '600' }}>
+                              AdjRW: {c.adjrw ? Number(c.adjrw).toFixed(4) : '-'}
+                            </div>
+                          </div>
+                        ) : (
+                          <span style={{ color: '#94a3b8' }}>-</span>
+                        )}
+                      </td>
+
+                      {/* Clinical Accuracy Audit Badge */}
+                      <td style={{ padding: '12px 16px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            fontSize: '11px',
+                            fontWeight: '700',
+                            backgroundColor:
+                              auditRes.grade === 'A'
+                                ? '#ecfdf5'
+                                : auditRes.grade === 'B'
+                                ? '#eff6ff'
+                                : auditRes.grade === 'C'
+                                ? '#fffbeb'
+                                : '#fef2f2',
+                            color:
+                              auditRes.grade === 'A'
+                                ? '#065f46'
+                                : auditRes.grade === 'B'
+                                ? '#1e40af'
+                                : auditRes.grade === 'C'
+                                ? '#92400e'
+                                : '#991b1b',
+                            border: `1px solid ${
+                              auditRes.grade === 'A'
+                                ? '#a7f3d0'
+                                : auditRes.grade === 'B'
+                                ? '#bfdbfe'
+                                : auditRes.grade === 'C'
+                                ? '#fde68a'
+                                : '#fecaca'
+                            }`,
+                          }}>
+                            เกรด {auditRes.grade} ({auditRes.score}%)
+                          </span>
+                        </div>
+                        {auditRes.issues.length > 0 && (
+                          <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                            {auditRes.issues[0].title}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Action */}
+                      <td style={{ padding: '12px 16px', textAlign: 'center' }}>
+                        <button
+                          type="button"
+                          onClick={() => onSelectCaseForOptimization(c.an || '')}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            padding: '6px 12px',
+                            backgroundColor: isUncoded ? '#2563eb' : '#f1f5f9',
+                            color: isUncoded ? '#ffffff' : '#1e293b',
+                            borderRadius: '6px',
+                            border: isUncoded ? 'none' : '1px solid #cbd5e1',
+                            fontSize: '12px',
+                            fontWeight: '700',
+                            cursor: 'pointer',
+                            transition: 'all 0.15s ease',
+                          }}
+                        >
+                          <Sparkles size={13} color={isUncoded ? '#ffffff' : '#2563eb'} />
+                          {isUncoded ? 'ให้รหัส & วิเคราะห์' : 'วิเคราะห์ DRG'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
 };
-
-export default WorklistPage;

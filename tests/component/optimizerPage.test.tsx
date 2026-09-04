@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { OptimizerPage } from '@/pages/OptimizerPage';
 import * as cmiApi from '@/services/cmiApi';
 import * as grouperClient from '@/drg/grouperClient';
@@ -12,7 +12,7 @@ describe('OptimizerPage Component', () => {
   it('renders search input and safety disclaimer banner', () => {
     render(<OptimizerPage />);
 
-    expect(screen.getByPlaceholderText(/ระบุเลข AN/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/AN/i)).toBeInTheDocument();
     expect(screen.getByText(/ข้อเสนอแนะเพื่อทบทวนโดย coder เท่านั้น/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /โหลดเคส/i })).toBeInTheDocument();
   });
@@ -22,7 +22,7 @@ describe('OptimizerPage Component', () => {
     vi.spyOn(cmiApi, 'fetchCaseDetail').mockResolvedValue({
       an: '1001',
       hn: '0054321',
-      ptname: 'นาย ประ*** ม***',
+      ptname: 'นาย ประสิทธิ์ มีสุข',
       sex: 'ชาย',
       age: 68,
       los: 6,
@@ -94,24 +94,37 @@ describe('OptimizerPage Component', () => {
       };
     });
 
-    render(<OptimizerPage />);
+    render(
+      <OptimizerPage
+        initialAn="1001"
+        externalStatus="connected"
+        externalConfig={{
+          apiUrl: 'https://test.bms.in.th',
+          databaseType: 'postgresql',
+          appIdentifier: 'test',
+        }}
+      />,
+    );
 
-    const input = screen.getByPlaceholderText(/ระบุเลข AN/i);
-    fireEvent.change(input, { target: { value: '1001' } });
-
-    const btn = screen.getByRole('button', { name: /โหลดเคส/i });
-    fireEvent.click(btn);
+    // Wait for fetchCaseDetail to be called
+    await waitFor(() => {
+      expect(cmiApi.fetchCaseDetail).toHaveBeenCalled();
+      expect(cmiApi.fetchUsageItems).toHaveBeenCalled();
+      expect(grouperClient.calculateDrg).toHaveBeenCalled();
+    });
 
     // Wait for baseline to appear
     await waitFor(() => {
-      expect(screen.getByText(/นาย ประ\*\*\* ม\*\*\*/i)).toBeInTheDocument();
-      expect(screen.getByText('J189')).toBeInTheDocument();
+      expect(screen.getByText(/ประสิทธิ์/i)).toBeInTheDocument();
+      expect(screen.getAllByText('J189').length).toBeGreaterThan(0);
     });
 
     // Verify suggestions table contains the ranked items
     await waitFor(() => {
       expect(screen.getByText('18010')).toBeInTheDocument();
       expect(screen.getByText('+1.7980')).toBeInTheDocument(); // 2.85 - 1.052 = 1.798
+      expect(screen.getByText(/ระบบตรวจสอบความถูกต้องของรหัสโรคและเกณฑ์ DRG/i)).toBeInTheDocument();
+      expect(screen.getByText(/คะแนนคุณภาพการให้รหัส/i)).toBeInTheDocument();
     });
   });
 });
