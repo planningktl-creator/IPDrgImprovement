@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { AlertTriangle, ArrowLeft, CheckCircle2, CircleStop, Clock3, Database, LoaderCircle, Plus, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, CheckCircle2, CircleStop, Clock3, Database, LoaderCircle, Plus, RotateCw, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { cmiCaseToDrgInput } from '@/cmi/caseAdapter';
 import type { CmiCaseRow, UsageLite } from '@/cmi/caseContract';
 import { extractCandidates, cleanIcdCode, type DxCandidate } from '@/suggest/candidateExtractor';
@@ -79,7 +79,7 @@ export function OptimizerPage({ initialAn, onBackToWorklist, externalConfig, ext
     controllerRef.current = null;
   }, []);
 
-  const handleLoadAndOptimize = useCallback(async (targetAn?: string, additionalCandidate?: string) => {
+  const handleLoadAndOptimize = useCallback(async (targetAn?: string, additionalCandidate?: string, forceRefresh = false) => {
     const an = (targetAn ?? anInput).trim();
     if (!an) { setError('กรุณาระบุเลข AN ที่ต้องการค้นหา'); return; }
     stopAnalysis();
@@ -89,15 +89,30 @@ export function OptimizerPage({ initialAn, onBackToWorklist, externalConfig, ext
     setAnInput(an); setLoading(true); setCancelled(false); setError(null); setBaseline(null); setSuggestions([]); setFailures([]); setProgress(null); setCandidates([]); setCurrentCase(null);
     try {
       setLoadingStep('กำลังดึงข้อมูลเคสจาก HIS…');
-      const row = await fetchCaseDetail(an, externalConfig ?? undefined, { signal: controller.signal, useDemoFallback: isDemo });
+      const row = await fetchCaseDetail(an, externalConfig ?? undefined, { signal: controller.signal, useDemoFallback: isDemo, bypassCache: forceRefresh });
       if (requestId !== requestRef.current) return;
       setCurrentCase(row);
       setLoadingStep('กำลังอ่านรายการยาและเวชภัณฑ์เพื่อสร้างหลักฐาน…');
-      const usage = await fetchUsageItems(an, externalConfig ?? undefined, { signal: controller.signal, useDemoFallback: isDemo });
+      const usage = await fetchUsageItems(an, externalConfig ?? undefined, { signal: controller.signal, useDemoFallback: isDemo, bypassCache: forceRefresh });
       if (requestId !== requestRef.current) return;
       setUsageItems(usage);
-      setLoadingStep('กำลังสกัดรหัสที่มีหลักฐานกำกับ…');
+      setLoadingStep('กำลังสกัดรหัสที่มีหลักฐานกำกับ และรหัส SDx เดิม…');
       let extracted = extractCandidates(usage);
+
+      // Include all existing SDx on this case from HIS into permutation testing
+      const existingSdx = getRowSdx(row);
+      for (const code of existingSdx) {
+        if (!code || code === row.pdx) continue;
+        const normalized = cleanIcdCode(code);
+        if (!extracted.some((item) => item.code === normalized)) {
+          extracted.push({
+            code: normalized,
+            source: 'existing_sdx',
+            evidence: ['รหัส SDx ที่บันทึกในเวชระเบียน HIS (iptdiag) สำหรับเคสนี้'],
+          });
+        }
+      }
+
       if (additionalCandidate) {
         const code = cleanIcdCode(additionalCandidate);
         if (!/^[A-Z0-9]{3,8}$/.test(code)) throw new Error('รหัสที่เพิ่มต้องเป็น ICD code ที่มีรูปแบบถูกต้อง');
@@ -106,7 +121,19 @@ export function OptimizerPage({ initialAn, onBackToWorklist, externalConfig, ext
       setCandidates(extracted);
       setLoadingStep('กำลังเรียก MOPH Grouper ตามลำดับเพื่อเทียบ DRG…');
       const input = cmiCaseToDrgInput(row, { hcode });
-      const result = await suggestHigherDrg(input, extracted.map((item) => ({ code: item.code, reason: `พบในหลักฐานการใช้ยา (${item.source})`, evidence: item.evidence })), { signal: controller.signal, maxCandidates: 20, onProgress: setProgress });
+      const result = await suggestHigherDrg(
+        input,
+        extracted.map((item) => ({
+          code: item.code,
+          reason: item.source === 'existing_sdx'
+            ? 'สลับ SDx เดิมใน HIS ขึ้นเป็น PDx เพื่อเปรียบเทียบทางเลือก'
+            : item.source === 'coder_manual'
+              ? 'ทดสอบตามที่ Coder เพิ่มรหัสเอง'
+              : `พบในหลักฐานการใช้ยา (${item.source})`,
+          evidence: item.evidence,
+        })),
+        { signal: controller.signal, maxCandidates: 25, onProgress: setProgress }
+      );
       if (requestId !== requestRef.current) return;
       setBaseline(result.baseline); setSuggestions(result.suggestions); setFailures(result.failures); setCancelled(result.cancelled);
     } catch (reason) {
@@ -148,14 +175,14 @@ export function OptimizerPage({ initialAn, onBackToWorklist, externalConfig, ext
   return <div className="page-stack optimizer-page">
     <section className="page-intro optimizer-intro"><div><span className="eyebrow">DRG REVIEW WORKBENCH</span><h2>วิเคราะห์เคสจากหลักฐาน</h2><p>ข้อเสนอแนะเพื่อทบทวนโดย Coder เท่านั้น · ระบบไม่เขียนข้อมูลกลับ HIS</p></div><button className="button button-quiet" type="button" onClick={onBackToWorklist}><ArrowLeft size={16} />กลับทะเบียนเคส</button></section>
     {externalStatus !== 'connected' && !isDemo && <ConnectionPrompt status={externalStatus} onConnect={onConnectSession} />}
-    <section className="case-search-panel"><div className="search-field large"><Search size={18} /><label className="sr-only" htmlFor="an-search">เลข AN</label><input id="an-search" value={anInput} onChange={(event) => setAnInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void handleLoadAndOptimize(); }} placeholder="ค้นหา AN เพื่อเริ่มวิเคราะห์" inputMode="numeric" /><button className="button button-primary" type="button" onClick={() => void handleLoadAndOptimize()} disabled={loading || !anInput.trim()}>{loading ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />} {loading ? 'กำลังวิเคราะห์' : 'โหลดเคส'}</button>{loading && <button className="button button-danger-quiet" type="button" onClick={stopAnalysis}><CircleStop size={16} />ยกเลิก</button>}</div>{error && <div className="inline-error" role="alert"><AlertTriangle size={17} /><span>{error}</span>{anInput.trim() && <button className="button button-secondary button-small" type="button" onClick={() => void handleLoadAndOptimize()}>ลองใหม่</button>}<button className="icon-button" type="button" onClick={() => setError(null)} aria-label="ปิดข้อความผิดพลาด"><X size={15} /></button></div>}</section>
+    <section className="case-search-panel"><div className="search-field large"><Search size={18} /><label className="sr-only" htmlFor="an-search">เลข AN</label><input id="an-search" value={anInput} onChange={(event) => setAnInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void handleLoadAndOptimize(); }} placeholder="ค้นหา AN เพื่อเริ่มวิเคราะห์" inputMode="numeric" /><button className="button button-primary" type="button" onClick={() => void handleLoadAndOptimize()} disabled={loading || !anInput.trim()}>{loading ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />} {loading ? 'กำลังวิเคราะห์' : 'โหลดเคส'}</button>{currentCase && <button className="button button-secondary" type="button" onClick={() => void handleLoadAndOptimize(currentCase.an, undefined, true)} disabled={loading} title="ดึงข้อมูลสดจากฐานข้อมูล HIS ใหม่ โดยไม่ใช้แคช"><RotateCw size={15} />รีเฟรชสด</button>}{loading && <button className="button button-danger-quiet" type="button" onClick={stopAnalysis}><CircleStop size={16} />ยกเลิก</button>}</div>{error && <div className="inline-error" role="alert"><AlertTriangle size={17} /><span>{error}</span>{anInput.trim() && <button className="button button-secondary button-small" type="button" onClick={() => void handleLoadAndOptimize(anInput, undefined, true)}>ลองใหม่ (สด)</button>}<button className="icon-button" type="button" onClick={() => setError(null)} aria-label="ปิดข้อความผิดพลาด"><X size={15} /></button></div>}</section>
     {loading && <section className="analysis-progress"><div className="progress-orbit"><LoaderCircle className="spin" size={24} /></div><div><strong>{loadingStep}</strong><span>{progress ? `ประมวลผล Grouper ${progress.completed}/${progress.total}` : 'กรุณารอสักครู่ ระบบกำลังตรวจสอบข้อมูลตามลำดับ'}</span></div></section>}
     {!loading && cancelled && <div className="inline-warning" role="status"><CircleStop size={17} />ยกเลิกการคำนวณแล้ว — ผลลัพธ์ที่แสดงเป็นเพียงบางส่วน</div>}
     {!loading && !currentCase && !error && <div className="empty-state large"><Sparkles size={30} /><strong>เลือกเคสเพื่อเริ่มการวิเคราะห์</strong><span>ระบุ AN จากทะเบียนเคส แล้วระบบจะดึงข้อมูลจริงและแสดงคำแนะนำที่มีหลักฐานกำกับ</span></div>}
     {currentCase && <>
       <section className="case-identity-panel"><div className="identity-main"><span className="eyebrow">CASE {currentCase.an}</span><h3>{currentCase.ptname || 'ไม่ระบุชื่อผู้ป่วย'}</h3><div className="identity-meta"><span>HN {currentCase.hn || '—'}</span><span>{currentCase.sex || '—'} · {currentCase.age ?? '—'} ปี</span><span>LOS {currentCase.los ?? '—'} วัน</span><span>{currentCase.firstWardName || currentCase.firstWard || 'ไม่ระบุหอผู้ป่วย'}</span></div></div><div className="identity-drg"><span>DRG จาก HIS</span><strong>{currentCase.drg || '—'}</strong><small>AdjRW {currentCase.adjrw != null ? Number(currentCase.adjrw).toFixed(4) : '—'}</small></div></section>
       <section className="code-overview"><CodeSet title="PDx · วินิจฉัยหลัก" codes={currentCase.pdx ? [currentCase.pdx] : []} tone="pdx" /><CodeSet title={`SDx · วินิจฉัยร่วม (${sdx.length}/12)`} codes={sdx} tone="sdx" /><CodeSet title={`Procedure · หัตถการ (${proc.length}/30)`} codes={proc} tone="proc" /></section>
-      <section className="analysis-grid"><div className="analysis-main"><div className="section-heading"><div><span className="eyebrow">GROUPER COMPARISON</span><h3>Baseline และโอกาสปรับปรุง</h3></div><span className="source-badge"><CheckCircle2 size={14} />MOPH V6</span></div><div className="compare-grid"><article className="compare-card"><span className="compare-label">Baseline จาก Grouper</span><strong>{baseline?.drg || currentCase.drg || 'ยังไม่ได้คำนวณ'}</strong><span>AdjRW {baseline?.adjrw != null ? baseline.adjrw.toFixed(4) : currentCase.adjrw != null ? Number(currentCase.adjrw).toFixed(4) : '—'}</span><small>{baseline?.wtlos != null ? `WtLOS ${baseline.wtlos.toFixed(2)} · OT ${baseline.ot ?? '—'}` : 'ข้อมูลจากเคสปัจจุบัน'}</small>{baseline?.error && <span className="grouper-error" role="alert">Grouper error: {baseline.error}</span>}{baseline?.warning && <span className="grouper-warning">Grouper warning: {baseline.warning}</span>}</article><article className="compare-card compare-opportunity"><span className="compare-label">คำแนะนำที่มี delta สูงสุด</span><strong>{suggestions[0]?.drg || '—'}</strong><span>{suggestions[0]?.delta != null ? `+${suggestions[0].delta.toFixed(4)} AdjRW` : 'ยังไม่มีคำแนะนำที่ผ่านเกณฑ์'}</span><small>{suggestions.length ? `${suggestions.length} ทางเลือกที่มีผลบวก` : 'ต้องมี evidence และผล Grouper ที่สูงขึ้น'}</small></article></div><div className="suggestion-header"><div><h3>คำแนะนำจาก Candidate</h3><p>ระบบจะแสดงเฉพาะ permutation ที่ AdjRW เพิ่มขึ้นและมีหลักฐานประกอบ</p></div><div className="manual-candidate"><input value={manualCode} onChange={(event) => setManualCode(event.target.value)} placeholder="เพิ่ม ICD เช่น N184" aria-label="เพิ่ม ICD candidate" /><button className="button button-secondary button-small" type="button" onClick={() => void addManualCandidate()} disabled={loading}><Plus size={14} />เพิ่ม</button></div></div>{suggestions.length > 0 ? <div className="suggestion-list">{suggestions.map((item, index) => <SuggestionCard suggestion={item} index={index} key={`${item.kind}-${item.pdx}-${index}`} />)}</div> : <div className="empty-inline"><CheckCircle2 size={18} />ยังไม่พบคำแนะนำที่ทำให้ AdjRW เพิ่มขึ้นจากหลักฐานที่มี</div>}{failures.length > 0 && <details className="failure-disclosure"><summary><AlertTriangle size={15} /> {failures.length} candidate คำนวณไม่สำเร็จ</summary><ul>{failures.map((item, index) => <li key={`${item.code}-${index}`}>{item.code} · {item.message}</li>)}</ul></details>}</div><aside className="analysis-side"><div className="section-heading"><div><span className="eyebrow">EVIDENCE</span><h3>Usage ที่ใช้ประกอบ</h3></div><span className="count-badge">{usageItems.length}</span></div><UsageEvidence items={usageItems} /><div className="candidate-summary"><span className="field-label">Candidates ที่พบ</span><div className="code-list">{candidates.length ? candidates.map((item) => <span className="code-pill code-sdx" key={item.code}>{item.code}</span>) : <span className="muted">ยังไม่พบ code จาก usage</span>}</div></div></aside></section>
+      <section className="analysis-grid"><div className="analysis-main"><div className="section-heading"><div><span className="eyebrow">GROUPER COMPARISON</span><h3>Baseline และโอกาสปรับปรุง</h3></div><span className="source-badge"><CheckCircle2 size={14} />MOPH V6</span></div><div className="compare-grid"><article className="compare-card"><span className="compare-label">Baseline จาก Grouper</span><strong>{baseline?.drg || currentCase.drg || 'ยังไม่ได้คำนวณ'}</strong><span>AdjRW {baseline?.adjrw != null ? baseline.adjrw.toFixed(4) : currentCase.adjrw != null ? Number(currentCase.adjrw).toFixed(4) : '—'}</span><small>{baseline?.wtlos != null ? `WtLOS ${baseline.wtlos.toFixed(2)} · OT ${baseline.ot ?? '—'}` : 'ข้อมูลจากเคสปัจจุบัน'}</small>{baseline?.error && <span className="grouper-error" role="alert">Grouper error: {baseline.error}</span>}{baseline?.warning && <span className="grouper-warning">Grouper warning: {baseline.warning}</span>}</article><article className="compare-card compare-opportunity"><span className="compare-label">คำแนะนำที่มี delta สูงสุด</span><strong>{suggestions[0]?.drg || '—'}</strong><span>{suggestions[0]?.delta != null ? `+${suggestions[0].delta.toFixed(4)} AdjRW` : 'ยังไม่มีคำแนะนำที่ผ่านเกณฑ์'}</span><small>{suggestions.length ? `${suggestions.length} ทางเลือกที่มีผลบวก` : 'ต้องมี evidence และผล Grouper ที่สูงขึ้น'}</small></article></div><div className="suggestion-header"><div><h3>คำแนะนำจาก Candidate</h3><p>ระบบจะแสดงเฉพาะ permutation ที่ AdjRW เพิ่มขึ้นและมีหลักฐานประกอบ</p></div><div className="manual-candidate"><input value={manualCode} onChange={(event) => setManualCode(event.target.value)} placeholder="เพิ่ม ICD เช่น N184" aria-label="เพิ่ม ICD candidate" /><button className="button button-secondary button-small" type="button" onClick={() => void addManualCandidate()} disabled={loading}><Plus size={14} />เพิ่ม</button></div></div>{suggestions.length > 0 ? <div className="suggestion-list">{suggestions.map((item, index) => <SuggestionCard suggestion={item} index={index} key={`${item.kind}-${item.pdx}-${index}`} />)}</div> : <div className="empty-inline"><CheckCircle2 size={18} />ยังไม่พบคำแนะนำที่ทำให้ AdjRW เพิ่มขึ้นจากหลักฐานที่มี</div>}{failures.length > 0 && <details className="failure-disclosure"><summary><AlertTriangle size={15} /> {failures.length} candidate คำนวณไม่สำเร็จ</summary><ul>{failures.map((item, index) => <li key={`${item.code}-${index}`}>{item.code} · {item.message}</li>)}</ul></details>}</div><aside className="analysis-side"><div className="section-heading"><div><span className="eyebrow">EVIDENCE</span><h3>Usage ที่ใช้ประกอบ</h3></div><span className="count-badge">{usageItems.length}</span></div><UsageEvidence items={usageItems} /><div className="candidate-summary"><span className="field-label">Candidates ที่นำมาสลับ/วิเคราะห์ ({candidates.length})</span><div className="code-list">{candidates.length ? candidates.map((item) => <span className={`code-pill ${item.source === 'existing_sdx' ? 'code-sdx' : item.source === 'coder_manual' ? 'code-proc' : 'code-pdx'}`} key={item.code} title={item.source === 'existing_sdx' ? 'SDx เดิมใน HIS' : item.source === 'coder_manual' ? 'Coder เพิ่มเอง' : 'หลักฐานยา/เวชภัณฑ์'}>{item.code} <small style={{ opacity: 0.8 }}>({item.source === 'existing_sdx' ? 'HIS' : item.source === 'coder_manual' ? 'Manual' : 'Rx'})</small></span>) : <span className="muted">ยังไม่พบ code</span>}</div></div></aside></section>
       {auditResult && <ClinicalAuditPanel audit={auditResult} onApplyCode={(code) => void handleLoadAndOptimize(currentCase.an, code)} />}
     </>}
     {!loading && currentCase && <div className="optimizer-footnote"><Clock3 size={15} />ผลการวิเคราะห์เป็น snapshot ของข้อมูล ณ เวลาที่โหลด · หากมีการแก้ไขข้อมูลใน HIS ให้โหลดเคสใหม่อีกครั้ง</div>}

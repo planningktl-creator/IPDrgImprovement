@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useState } from 'react';
 import {
+  clearCmiCache,
   extractConnectionConfig,
   getStoredBmsSessionId,
   persistBmsSessionId,
@@ -76,6 +77,7 @@ export function useBmsSession(): {
   const connect = useCallback(async (sessionId: string) => {
     const clean = sessionId.trim();
     if (!clean) {
+      clearCmiCache();
       removeStoredBmsSessionId();
       dispatch({ type: 'clear' });
       return;
@@ -85,10 +87,12 @@ export function useBmsSession(): {
     try {
       const raw = await retrieveBmsSession(clean);
       const config = extractConnectionConfig(raw);
+      clearCmiCache();
       persistBmsSessionId(clean);
       clearSessionFromUrl();
       dispatch({ type: 'connected', sessionId: clean, config });
     } catch (error) {
+      clearCmiCache();
       removeStoredBmsSessionId();
       const safeMessage = friendlySessionError(error);
       dispatch({ type: 'error', message: safeMessage });
@@ -109,6 +113,7 @@ export function useBmsSession(): {
       .catch((error: unknown) => {
         if (!controller.signal.aborted) {
           clearSessionFromUrl();
+          clearCmiCache();
           removeStoredBmsSessionId();
           dispatch({ type: 'error', message: friendlySessionError(error) });
         }
@@ -117,6 +122,7 @@ export function useBmsSession(): {
   }, [firstSessionId]);
 
   const disconnect = useCallback(() => {
+    clearCmiCache();
     removeStoredBmsSessionId();
     dispatch({ type: 'clear' });
   }, []);

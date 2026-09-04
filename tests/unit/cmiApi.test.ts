@@ -17,9 +17,14 @@ import {
   retrieveBmsSession,
   extractConnectionConfig,
   isBmsSessionFailure,
+  clearCmiCache,
 } from '@/services/cmiApi';
 
 describe('cmiApi read-only guards', () => {
+  beforeEach(() => {
+    clearCmiCache();
+    vi.restoreAllMocks();
+  });
   it('allows read-only SELECT and WITH statements', () => {
     expect(() => assertCmiQueryIsReadOnly(CASE_DETAIL_SQL)).not.toThrow();
     expect(() => assertCmiQueryIsReadOnly(USAGE_SQL)).not.toThrow();
@@ -89,6 +94,7 @@ describe('cmiApi read-only guards', () => {
 
 describe('fetchCaseDetail and fetchUsageItems', () => {
   beforeEach(() => {
+    clearCmiCache();
     vi.restoreAllMocks();
   });
 
@@ -349,6 +355,34 @@ describe('SQL Query Parameter Compatibility and 409 Error Handling', () => {
 
     expect(caughtError).toBeInstanceOf(Error);
     expect(isBmsSessionFailure(caughtError)).toBe(true);
+  });
+
+  it('reuses in-memory cached caseDetail on repeat calls and fetches fresh when bypassCache is true', async () => {
+    const config = { apiUrl: 'https://bms.test', hospitalCode: '10929', databaseType: 'postgresql' as const, databaseSupportStatus: 'supported' as const, appIdentifier: 'test' };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        result: [{ an: '6900123', hn: '12345', pdx: 'J189', sex: '1', age: 60, los: 3 }],
+        MessageCode: 200,
+      }),
+    });
+    globalThis.fetch = fetchMock;
+
+    // First call: network fetch
+    const first = await fetchCaseDetail('6900123', config);
+    expect(first.an).toBe('6900123');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Second call: in-memory cache hit (zero additional network requests)
+    const second = await fetchCaseDetail('6900123', config);
+    expect(second.an).toBe('6900123');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Third call with bypassCache: true: triggers fresh network fetch
+    const third = await fetchCaseDetail('6900123', config, { bypassCache: true });
+    expect(third.an).toBe('6900123');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

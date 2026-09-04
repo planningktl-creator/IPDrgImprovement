@@ -2,7 +2,7 @@ import type { UsageLite } from '@/cmi/caseContract';
 
 export interface DxCandidate {
   code: string;
-  source: 'presc_reason' | 'need_order_reason' | 'coder_manual';
+  source: 'presc_reason' | 'need_order_reason' | 'coder_manual' | 'existing_sdx';
   evidence: string[];
 }
 

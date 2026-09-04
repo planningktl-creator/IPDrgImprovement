@@ -125,6 +125,9 @@ describe('OptimizerPage Component', () => {
       expect(screen.getAllByText(/\+1\.7980/).length).toBeGreaterThan(0); // 2.85 - 1.052 = 1.798
       expect(screen.getByText(/ระบบตรวจสอบความถูกต้องของรหัสโรคและเกณฑ์ DRG/i)).toBeInTheDocument();
       expect(screen.getByText(/คะแนนคุณภาพการให้รหัส/i)).toBeInTheDocument();
+      // Both existing SDx from HIS (I10) and usage evidence (A419) are in candidates
+      expect(screen.getAllByText(/I10/i).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/A419/i).length).toBeGreaterThan(0);
     });
   });
 });

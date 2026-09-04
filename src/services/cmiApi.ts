@@ -13,6 +13,19 @@ import type {
   UsageLite,
   WorklistQueryParams,
 } from '@/cmi/caseContract';
+import {
+  getCachedCaseDetail,
+  setCachedCaseDetail,
+  getCachedUsageItems,
+  setCachedUsageItems,
+  getCachedWorklistPage,
+  setCachedWorklistPage,
+  clearCmiCache,
+  invalidateCaseCache,
+  getCmiCacheStats,
+} from './cmiCache';
+
+export { clearCmiCache, invalidateCaseCache, getCmiCacheStats };
 
 export const PASTE_JSON_URL = 'https://hosxp.net/phapi/PasteJSON';
 export const APP_IDENTIFIER = 'DRG.Optimizer.React';
@@ -803,7 +816,14 @@ function summarizeCases(cases: CmiCaseRow[], rates: PayerRateConfig[]): CaseSumm
   return { total, uncoded, coded: total - uncoded, totalAdjrw, averageCmi: total > 0 ? totalAdjrw / total : 0, totalIncome, estimatedRevenue: calculateEstimatedRevenue(totalAdjrw, singleRate), revenueRateLabel: singleRate ? `${singleRate.label} · ${singleRate.baseRate.toLocaleString()} บาท/AdjRW` : null };
 }
 
-export async function fetchCasePage(input: WorklistQueryParams, config?: BmsConnectionConfig, opts: { signal?: AbortSignal; useDemoFallback?: boolean; rates?: PayerRateConfig[] } = {}): Promise<CasePageResult> {
+export function getSessionScope(config?: BmsConnectionConfig, useDemoFallback?: boolean): string {
+  if (useDemoFallback || !config?.apiUrl) return 'demo';
+  const hcode = config.hospitalCode || 'unknown';
+  const tokenPart = config.bearerToken ? config.bearerToken.slice(-8) : 'notoken';
+  return `${hcode}:${tokenPart}`;
+}
+
+export async function fetchCasePage(input: WorklistQueryParams, config?: BmsConnectionConfig, opts: { signal?: AbortSignal; useDemoFallback?: boolean; rates?: PayerRateConfig[]; bypassCache?: boolean } = {}): Promise<CasePageResult> {
   const params = validateWorklistQuery(input);
   const rates = opts.rates ?? getPayerRateConfig(opts.useDemoFallback ? 'demo' : 'runtime');
 
@@ -835,6 +855,13 @@ export async function fetchCasePage(input: WorklistQueryParams, config?: BmsConn
 
   if (!config?.apiUrl) return { items: [], nextCursor: null, hasMore: false, count: 0, totalCount: 0, summary: summarizeCases([], rates), fetchedAt: new Date().toISOString() };
 
+  const scope = getSessionScope(config, opts.useDemoFallback);
+  const cacheKey = JSON.stringify(params);
+  if (!opts.bypassCache) {
+    const cached = getCachedWorklistPage(cacheKey, scope);
+    if (cached) return cached;
+  }
+
   const apiParams = queryParamsForWorklist(params, rates);
   // Execute sequentially to prevent HTTP 409 concurrency lock on BMS API gateway.
   // worklistSummary computes total_count, uncoded_count, coded_count, total_adjrw, and total_income in a single unified pass.
@@ -850,31 +877,52 @@ export async function fetchCasePage(input: WorklistQueryParams, config?: BmsConn
   const uncoded = numericOrNull(summaryRow.uncoded_count) ?? 0;
   const rate = params.scheme && params.scheme !== 'all' ? rates.find((item) => item.scheme === params.scheme && item.effectiveFrom <= params.dstart && (!item.effectiveTo || item.effectiveTo >= params.dend)) : null;
   const summary: CaseSummary = { total, uncoded, coded: Math.max(0, total - uncoded), totalAdjrw, averageCmi: total > 0 ? totalAdjrw / total : 0, totalIncome: numericOrNull(summaryRow.total_income) ?? 0, estimatedRevenue: calculateEstimatedRevenue(totalAdjrw, rate ? { scheme: rate.scheme, label: rate.label, baseRate: rate.baseRate, source: 'runtime-config' } : null), revenueRateLabel: rate ? `${rate.label} · ${rate.baseRate.toLocaleString()} บาท/AdjRW` : null };
-  return { items, nextCursor: hasMore ? cursorEncode(last?.dchdate, last?.an) : null, hasMore, count: total, totalCount: total, summary, fetchedAt: new Date().toISOString() };
+  const result: CasePageResult = { items, nextCursor: hasMore ? cursorEncode(last?.dchdate, last?.an) : null, hasMore, count: total, totalCount: total, summary, fetchedAt: new Date().toISOString() };
+  setCachedWorklistPage(cacheKey, scope, result);
+  return result;
 }
 
-export async function fetchCaseWorklist(params: WorklistQueryParams, config?: BmsConnectionConfig, opts: { signal?: AbortSignal; useDemoFallback?: boolean; rates?: PayerRateConfig[] } = {}): Promise<CmiCaseRow[]> {
+export async function fetchCaseWorklist(params: WorklistQueryParams, config?: BmsConnectionConfig, opts: { signal?: AbortSignal; useDemoFallback?: boolean; rates?: PayerRateConfig[]; bypassCache?: boolean } = {}): Promise<CmiCaseRow[]> {
   return (await fetchCasePage(params, config, opts)).items;
 }
 
-export async function fetchCaseDetail(an: string, config?: BmsConnectionConfig, opts: { signal?: AbortSignal; useDemoFallback?: boolean } = {}): Promise<CmiCaseRow> {
+export async function fetchCaseDetail(an: string, config?: BmsConnectionConfig, opts: { signal?: AbortSignal; useDemoFallback?: boolean; bypassCache?: boolean } = {}): Promise<CmiCaseRow> {
   const cleanAn = an.trim();
   if (!/^[A-Za-z0-9-]{1,32}$/.test(cleanAn)) throw new Error('กรุณาระบุ AN ที่ถูกต้อง');
   if (opts.useDemoFallback) return { ...(DEMO_WORKLIST_CASES.find((item) => item.an === cleanAn) ?? DEMO_CASE_DETAIL), an: cleanAn };
   if (!config?.apiUrl) throw new Error('ยังไม่ได้เชื่อมต่อ BMS Session กรุณาระบุ BMS Session ID เพื่อเชื่อมต่อฐานข้อมูล HOSxP/HIS จริง');
+
+  const scope = getSessionScope(config, opts.useDemoFallback);
+  if (!opts.bypassCache) {
+    const cached = getCachedCaseDetail(cleanAn, scope);
+    if (cached) return cached;
+  }
+
   const rows = await executeCmiQuery('caseDetail', config, { an: { value: cleanAn, value_type: 'string' } }, opts.signal);
   if (!rows[0]) throw new Error(`ไม่พบข้อมูลเคส AN ${cleanAn} ในระบบ`);
-  return mapRawRowToCmiCaseRow(rows[0], cleanAn);
+  const result = mapRawRowToCmiCaseRow(rows[0], cleanAn);
+  setCachedCaseDetail(cleanAn, scope, result);
+  return result;
 }
 
-export async function fetchUsageItems(an: string, config?: BmsConnectionConfig, opts: { signal?: AbortSignal; useDemoFallback?: boolean; pageSize?: number } = {}): Promise<UsageLite[]> {
+export async function fetchUsageItems(an: string, config?: BmsConnectionConfig, opts: { signal?: AbortSignal; useDemoFallback?: boolean; pageSize?: number; bypassCache?: boolean } = {}): Promise<UsageLite[]> {
   const cleanAn = an.trim();
   if (!cleanAn) return [];
   if (!/^[A-Za-z0-9-]{1,32}$/.test(cleanAn)) throw new Error('กรุณาระบุ AN ที่ถูกต้อง');
   if (opts.useDemoFallback) return DEMO_USAGE_ITEMS.map((item) => ({ ...item, an: cleanAn }));
   if (!config?.apiUrl) return [];
-  const rows = await executeCmiQuery('usagePage', config, { an: { value: cleanAn, value_type: 'string' }, page_limit: { value: Math.min(300, Math.max(1, opts.pageSize ?? 300)), value_type: 'integer' } }, opts.signal);
-  return rows.map((row) => ({ hosGuid: row.hos_guid ? String(row.hos_guid) : null, an: cleanAn, icode: row.icode ? String(row.icode) : null, itemName: row.item_name ? String(row.item_name) : null, needOrderReason: row.need_order_reason ? String(row.need_order_reason) : null, prescReason: row.presc_reason ? String(row.presc_reason) : null, prescReason2: row.presc_reason_2 ? String(row.presc_reason_2) : null, prescReason3: row.presc_reason_3 ? String(row.presc_reason_3) : null, prescReason4: row.presc_reason_4 ? String(row.presc_reason_4) : null, prescReason5: row.presc_reason_5 ? String(row.presc_reason_5) : null, incomeName: row.income_name ? String(row.income_name) : null, sumPrice: numericOrNull(row.sum_price), qty: numericOrNull(row.qty), unitPrice: numericOrNull(row.unitprice) }));
+
+  const pageSize = Math.min(300, Math.max(1, opts.pageSize ?? 300));
+  const scope = getSessionScope(config, opts.useDemoFallback);
+  if (!opts.bypassCache) {
+    const cached = getCachedUsageItems(cleanAn, scope, pageSize);
+    if (cached) return cached;
+  }
+
+  const rows = await executeCmiQuery('usagePage', config, { an: { value: cleanAn, value_type: 'string' }, page_limit: { value: pageSize, value_type: 'integer' } }, opts.signal);
+  const result = rows.map((row) => ({ hosGuid: row.hos_guid ? String(row.hos_guid) : null, an: cleanAn, icode: row.icode ? String(row.icode) : null, itemName: row.item_name ? String(row.item_name) : null, needOrderReason: row.need_order_reason ? String(row.need_order_reason) : null, prescReason: row.presc_reason ? String(row.presc_reason) : null, prescReason2: row.presc_reason_2 ? String(row.presc_reason_2) : null, prescReason3: row.presc_reason_3 ? String(row.presc_reason_3) : null, prescReason4: row.presc_reason_4 ? String(row.presc_reason_4) : null, prescReason5: row.presc_reason_5 ? String(row.presc_reason_5) : null, incomeName: row.income_name ? String(row.income_name) : null, sumPrice: numericOrNull(row.sum_price), qty: numericOrNull(row.qty), unitPrice: numericOrNull(row.unitprice) }));
+  setCachedUsageItems(cleanAn, scope, pageSize, result);
+  return result;
 }
 
 export async function exportCaseWorklist(input: WorklistQueryParams, config: BmsConnectionConfig, format: 'csv' | 'xlsx' = 'csv', opts: { signal?: AbortSignal; rates?: PayerRateConfig[] } = {}): Promise<{ rows: CmiCaseRow[]; truncated: boolean; format: 'csv' | 'xlsx' }> {
